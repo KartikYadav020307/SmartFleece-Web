@@ -1,0 +1,197 @@
+// SmartFleece database schema.
+// SQLite is used for zero-config local development; switch `provider` to
+// "postgresql" (and set DATABASE_URL) to run on Supabase/Postgres. Enums are
+// not supported on SQLite, so status/type fields are strings validated at the
+// application layer (lib/validation.ts).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  passwordHash String
+  name         String
+  role         String       @default("WORKER") // OWNER | WORKER | ACCOUNTANT
+  isSample     Boolean      @default(false)
+  sessions     Session[]
+  stageEvents  StageEvent[]
+  createdAt    DateTime     @default(now())
+}
+
+model Session {
+  token     String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model Customer {
+  id          String     @id @default(cuid())
+  name        String
+  email       String?
+  phone       String?
+  farmName    String?
+  location    String?
+  preferences String? // saved processing preferences (free text)
+  notes       String? // internal mill notes
+  archived    Boolean    @default(false)
+  isSample    Boolean    @default(false)
+  orders      Order[]
+  lots        FiberLot[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([name])
+}
+
+model Order {
+  id                  String            @id @default(cuid())
+  orderNumber         String            @unique
+  customerId          String
+  customer            Customer          @relation(fields: [customerId], references: [id])
+  orderDate           DateTime          @default(now())
+  shearingDate        DateTime?
+  farmInfo            String? // farm / supplier context for this clip
+  targetProduct       String? // Yarn | Roving | Batts | Felt | Washed Fiber
+  yarnSpecs           String? // free text / JSON (weight, ply, twist)
+  dyeSpecs            String?
+  rush                Boolean           @default(false)
+  status              String            @default("RECEIVED") // see lib/constants.ts ORDER_STATUSES
+  estimatedCompletion DateTime?
+  notes               String?
+  trackingToken       String            @unique @default(cuid()) // unguessable public tracking URL token
+  isSample            Boolean           @default(false)
+  lots                FiberLot[]
+  notifications       NotificationLog[]
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+}
+
+model FiberLot {
+  id              String        @id @default(cuid())
+  lotCode         String        @unique // human-readable + QR payload (opaque, no customer data)
+  orderId         String
+  order           Order         @relation(fields: [orderId], references: [id])
+  customerId      String
+  customer        Customer      @relation(fields: [customerId], references: [id])
+  fiberType       String
+  breed           String?
+  greaseWeightG   Int // intake weight, grams
+  currentWeightG  Int
+  currentStageId  String?
+  currentStage    Stage?        @relation(fields: [currentStageId], references: [id])
+  status          String        @default("PENDING") // see lib/constants.ts LOT_STATUSES
+  conditionGrade  String? // A | B | C | D
+  vmRating        String? // None | Low | Medium | Heavy
+  stapleLengthMm  Int?
+  microns         Int?
+  color           String?
+  photos          String? // JSON array of storage URLs (storage integration pending)
+  isBatch         Boolean       @default(false) // created by blending lots
+  notes           String?
+  isSample        Boolean       @default(false)
+  stageEvents     StageEvent[]
+  parents         LineageEdge[] @relation("child")
+  children        LineageEdge[] @relation("parent")
+  qualityFlags    QualityFlag[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([orderId])
+  @@index([customerId])
+  @@index([status])
+  @@index([currentStageId])
+}
+
+model Stage {
+  id             String       @id @default(cuid())
+  name           String
+  sequence       Int
+  optional       Boolean      @default(false)
+  expectedLossPct Float        @default(0)
+  isActive       Boolean      @default(true)
+  stageEvents    StageEvent[]
+  lots           FiberLot[]
+}
+
+model StageEvent {
+  id            String    @id @default(cuid())
+  lotId         String
+  lot           FiberLot  @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  stageId       String
+  stage         Stage     @relation(fields: [stageId], references: [id])
+  workerId      String?
+  worker        User?     @relation(fields: [workerId], references: [id])
+  eventType     String    @default("COMPLETED") // COMPLETED | SKIPPED
+  machine       String? // free-text machine/equipment used (registry planned Phase 2)
+  inputWeightG  Int?
+  outputWeightG Int?
+  notes         String?
+  clientEventId String?   @unique // idempotency key for offline scan queue sync
+  revertedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([lotId])
+  @@index([stageId])
+}
+
+model LineageEdge {
+  id              String   @id @default(cuid())
+  parentLotId     String
+  parentLot       FiberLot @relation("parent", fields: [parentLotId], references: [id], onDelete: Cascade)
+  childLotId      String
+  childLot        FiberLot @relation("child", fields: [childLotId], references: [id], onDelete: Cascade)
+  contributionG   Int?
+  contributionPct Float?
+  lineageType     String // BLEND | SPLIT
+  notes           String?
+  createdAt       DateTime @default(now())
+
+  @@index([parentLotId])
+  @@index([childLotId])
+}
+
+model QualityFlag {
+  id           String    @id @default(cuid())
+  lotId        String
+  lot          FiberLot  @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  stageEventId String?
+  flagType     String // VM | FELTING | COLOR | ODOR | MOLD | PEST | WEIGHT | OTHER
+  severity     String    @default("MEDIUM") // LOW | MEDIUM | HIGH
+  notes        String?
+  status       String    @default("OPEN") // OPEN | RESOLVED
+  resolvedBy   String?
+  resolvedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([lotId])
+  @@index([status])
+}
+
+model NotificationLog {
+  id        String   @id @default(cuid())
+  orderId   String?
+  order     Order?   @relation(fields: [orderId], references: [id])
+  lotId     String?
+  channel   String   @default("EMAIL") // EMAIL | SMS | SYSTEM
+  event     String // ORDER_RECEIVED | STAGE_COMPLETE | ORDER_READY | DELAY | INVOICE
+  recipient String?
+  subject   String
+  body      String
+  status    String   @default("LOGGED") // LOGGED (dev mode) | SENT | FAILED
+  error     String?
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}

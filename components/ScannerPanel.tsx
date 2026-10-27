@@ -37,6 +37,7 @@ export default function ScannerPanel() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [queued, setQueued] = useState(0);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [machines, setMachines] = useState<{ id: string; name: string }[]>([]);
   const scannerRef = useRef<{ stop: () => Promise<void>; clear: () => void } | null>(null);
 
   const lookup = useCallback(async (code: string) => {
@@ -65,6 +66,14 @@ export default function ScannerPanel() {
     const code = params.get("code");
     if (code) lookup(code);
   }, [params, lookup]);
+
+  // Machine registry for the stage-event dropdown (graceful if unavailable).
+  useEffect(() => {
+    fetch("/api/machines")
+      .then((r) => (r.ok ? r.json() : { machines: [] }))
+      .then((d) => setMachines((d.machines ?? []).filter((m: { isActive: boolean }) => m.isActive).map((m: { id: string; name: string }) => ({ id: m.id, name: m.name }))))
+      .catch(() => undefined);
+  }, []);
 
   // Queue badge + auto-sync when back online.
   useEffect(() => {
@@ -265,6 +274,7 @@ export default function ScannerPanel() {
             <div className="pt-3 border-t border-line">
               <p className="label">Record stage event</p>
               <StageEventForm
+                machines={machines}
                 target={{
                   lotId: lot.id,
                   lotCode: lot.lotCode,

@@ -107,6 +107,12 @@ export default async function TrackPage({ params }: { params: Promise<{ token: s
           {order.estimatedCompletion ? (
             <p className="text-sm bg-forest-soft text-forest-dark rounded-lg px-3 py-2 mt-4">
               📅 Estimated completion: {fmtDate(order.estimatedCompletion)}
+              {order.etaConfidenceDays ? ` (±${order.etaConfidenceDays} day${order.etaConfidenceDays > 1 ? "s" : ""})` : ""}
+              {order.etaBasedOnSamples ? (
+                <span className="block text-xs mt-0.5 opacity-80">
+                  Based on this mill's actual processing history for {order.etaBasedOnSamples} stage events — updated as your fiber moves.
+                </span>
+              ) : null}
             </p>
           ) : null}
         </div>

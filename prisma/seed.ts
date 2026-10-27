@@ -29,6 +29,7 @@ async function main() {
   await prisma.qualityFlag.deleteMany();
   await prisma.lineageEdge.deleteMany();
   await prisma.stageEvent.deleteMany();
+  await prisma.machine.deleteMany();
   await prisma.fiberLot.deleteMany();
   await prisma.order.deleteMany();
   await prisma.customer.deleteMany();
@@ -55,6 +56,14 @@ async function main() {
       })
     );
   }
+
+  const machines = {
+    washer1: await prisma.machine.create({ data: { name: "Washer #1", type: "Washer", capacityKg: 8, isSample: true } }),
+    washer2: await prisma.machine.create({ data: { name: "Washer #2", type: "Washer", capacityKg: 15, isSample: true } }),
+    carder1: await prisma.machine.create({ data: { name: "Carder #1", type: "Carder", capacityKg: 12, isSample: true } }),
+    spinner1: await prisma.machine.create({ data: { name: "Spinning Frame #1", type: "Spinning Frame", capacityKg: 6, isSample: true } }),
+  };
+  void machines;
 
   const customers = {
     ravi: await prisma.customer.create({
@@ -194,6 +203,38 @@ async function main() {
 
   const now = Date.now();
   const daysAgo = (d: number) => new Date(now - d * DAY);
+
+  // ── ORD-0815: Ravi — 2025 clip, fully completed (multi-season history) ───
+  const o0815 = await makeOrder({
+    orderNumber: "ORD-0815",
+    customerId: customers.ravi.id,
+    daysAgo: 420,
+    status: "COMPLETED",
+    targetProduct: "Yarn",
+    yarnSpecs: "Worsted weight, 2-ply",
+    shearingDate: daysAgo(432),
+    farmInfo: "2025 spring clip, 15 ewes",
+  });
+  const { lot: l0815, finalWeight: w0815 } = await makeLot({
+    orderId: o0815.id,
+    customerId: customers.ravi.id,
+    fiberType: "Merino Wool",
+    breed: "Merino",
+    color: "White",
+    greaseWeightG: 5200,
+    vmRating: "Low",
+    conditionGrade: "B",
+    upto: 15,
+    weights: [5200, 5100, 4900, 3100, 3060, 3030, 2980, 2930, 2920, 2900, 2880, 2880, 2870, 2860, 2850, 2840],
+    start: daysAgo(420),
+    stepHours: 20,
+  });
+  await prisma.order.update({
+    where: { id: o0815.id },
+    data: { estimatedCompletion: daysAgo(410), updatedAt: daysAgo(410) },
+  });
+  void l0815;
+  void w0815;
 
   // ── ORD-1021: Ravi — fully completed last month ──────────────────────────
   const o1021 = await makeOrder({
@@ -532,9 +573,27 @@ async function main() {
     },
   });
 
+  // Assign registry machines to historical events so utilization has data.
+  await prisma.stageEvent.updateMany({ where: { stage: { name: "Washing" } }, data: { machineId: machines.washer1.id } });
+  await prisma.stageEvent.updateMany({ where: { stage: { name: "Rinse" } }, data: { machineId: machines.washer2.id } });
+  await prisma.stageEvent.updateMany({ where: { stage: { name: "Carding" } }, data: { machineId: machines.carder1.id } });
+  await prisma.stageEvent.updateMany({ where: { stage: { name: "Spinning" } }, data: { machineId: machines.spinner1.id } });
+
+  // Plausible rule-based ETAs on the in-production sample orders (the app
+  // recalculates these from real stage history on every event).
+  await prisma.order.update({
+    where: { orderNumber: "ORD-1024" },
+    data: { estimatedCompletion: new Date(now + 6 * DAY), etaConfidenceDays: 2, etaBasedOnSamples: 46 },
+  });
+  await prisma.order.update({
+    where: { orderNumber: "ORD-1025" },
+    data: { estimatedCompletion: new Date(now + 9 * DAY), etaConfidenceDays: 3, etaBasedOnSamples: 46 },
+  });
+
   const counts = {
     users: await prisma.user.count(),
     stages: await prisma.stage.count(),
+    machines: await prisma.machine.count(),
     customers: await prisma.customer.count(),
     orders: await prisma.order.count(),
     lots: await prisma.fiberLot.count(),

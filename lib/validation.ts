@@ -75,6 +75,7 @@ export const lotCreateSchema = lotInputSchema;
 export const stageEventSchema = z.object({
   stageId: z.string().min(1),
   eventType: z.enum(STAGE_EVENT_TYPES).default("COMPLETED"),
+  machineId: z.string().optional(),
   machine: optionalString,
   inputWeightG: optionalInt.refine((v) => v === undefined || v >= 0, "Weight must be zero or more"),
   outputWeightG: optionalInt.refine((v) => v === undefined || v >= 0, "Weight must be zero or more"),
@@ -154,6 +155,34 @@ export const paymentSchema = z.object({
 export const extraChargeSchema = z.object({
   description: z.string().trim().min(1, "Description is required").max(120),
   amountMajor: z.coerce.number().positive("Amount must be greater than zero"),
+});
+
+export const machineSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(60),
+  type: z.string().trim().min(1, "Type is required").max(40),
+  capacityKg: z.coerce.number().min(0, "Capacity cannot be negative").max(10000).default(0),
+  status: z.enum(["AVAILABLE", "IN_USE", "MAINTENANCE"]).default("AVAILABLE"),
+  notes: optionalString,
+  isActive: z.coerce.boolean().default(true),
+});
+
+export const DELAY_REASONS = [
+  "MACHINE_BREAKDOWN",
+  "FIBER_CONDITION",
+  "STAFF_ABSENCE",
+  "RUSH_REORDER",
+  "WEATHER",
+  "OTHER",
+] as const;
+
+export const delaySchema = z.object({
+  reason: z.enum(DELAY_REASONS),
+  extraDays: z.coerce
+    .number()
+    .int("Days must be a whole number")
+    .min(1, "Delay must be at least 1 day")
+    .max(60, "Delay cannot exceed 60 days"),
+  notes: optionalString,
 });
 
 export function firstIssue(error: z.ZodError): string {

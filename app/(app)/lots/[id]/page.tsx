@@ -24,13 +24,13 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
       customer: true,
       order: true,
       currentStage: true,
-      stageEvents: { orderBy: { createdAt: "asc" }, include: { stage: true, worker: true } },
+      stageEvents: { orderBy: { createdAt: "asc" }, include: { stage: true, worker: true, machineRef: { select: { name: true } } } },
       qualityFlags: { orderBy: { createdAt: "desc" } },
     },
   });
   if (!lot) notFound();
 
-  const [stages, ancestors, descendants, blendCandidates] = await Promise.all([
+  const [stages, ancestors, descendants, blendCandidates, machines] = await Promise.all([
     getStages(),
     getAncestorTree(lot.id),
     getDescendantTree(lot.id),
@@ -45,6 +45,7 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
           include: { customer: { select: { name: true } }, currentStage: { select: { name: true } } },
         })
       : Promise.resolve([]),
+    prisma.machine.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
   ]);
 
   const activeEvents = lot.stageEvents.filter((e) => !e.revertedAt);
@@ -136,6 +137,7 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
             actions={<UndoStageButton lotId={lot.id} disabled={activeEvents.length === 0} />}
           >
             <StageEventForm
+              machines={machines}
               target={{
                 lotId: lot.id,
                 lotCode: lot.lotCode,
@@ -188,7 +190,7 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
                             ) : null}
                           </td>
                           <td className="td text-muted">{event.worker?.name ?? "—"}</td>
-                          <td className="td text-muted">{event.machine ?? "—"}</td>
+                          <td className="td text-muted">{event.machineRef?.name ?? event.machine ?? "—"}</td>
                           <td className="td text-muted whitespace-nowrap">
                             {event.inputWeightG !== null ? fmtWeight(event.inputWeightG) : "—"} →{" "}
                             {event.outputWeightG !== null ? fmtWeight(event.outputWeightG) : "—"}

@@ -5,6 +5,7 @@ import { getPricingConfig, parseRates } from "@/lib/invoice";
 import { Badge, Card, PageHeader } from "@/components/ui";
 import StageEditor from "@/components/StageEditor";
 import PricingEditor from "@/components/PricingEditor";
+import MachineEditor from "@/components/MachineEditor";
 import { fmtDateTime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -13,11 +14,12 @@ export default async function SettingsPage() {
   const user = await requireUser();
   const isOwner = user.role === "OWNER";
 
-  const [stages, users, notifications, pricingRow] = await Promise.all([
+  const [stages, users, notifications, pricingRow, machines] = await Promise.all([
     getAllStages(),
     prisma.user.findMany({ orderBy: { role: "asc" }, select: { id: true, name: true, email: true, role: true, isSample: true } }),
     prisma.notificationLog.findMany({ orderBy: { createdAt: "desc" }, take: 15, include: { order: { select: { orderNumber: true } } } }),
     getPricingConfig(),
+    prisma.machine.findMany({ orderBy: { name: "asc" } }),
   ]);
   const pricing = {
     currencyCode: pricingRow.currencyCode,
@@ -72,6 +74,24 @@ export default async function SettingsPage() {
         description="Invoices bill actual processed weight at these rates. Currency and tax are fully configurable."
       >
         <PricingEditor pricing={pricing} isOwner={isOwner} />
+      </Card>
+
+      <Card
+        title="Machines & Equipment"
+        description="Registry behind the machine picker on stage events, and the utilization view on Production."
+      >
+        <MachineEditor
+          isOwner={isOwner}
+          machines={machines.map((m) => ({
+            id: m.id,
+            name: m.name,
+            type: m.type,
+            capacityKg: m.capacityKg,
+            status: m.status,
+            notes: m.notes,
+            isActive: m.isActive,
+          }))}
+        />
       </Card>
 
       <div className="grid lg:grid-cols-2 gap-4">

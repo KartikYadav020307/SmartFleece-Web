@@ -66,6 +66,8 @@ model Order {
   rush                Boolean           @default(false)
   status              String            @default("RECEIVED") // see lib/constants.ts ORDER_STATUSES
   estimatedCompletion DateTime?
+  etaConfidenceDays   Int? // ± days from historical spread (rule-based ETA)
+  etaBasedOnSamples   Int? // how many historical stage events back the estimate
   notes               String?
   trackingToken       String            @unique @default(cuid()) // unguessable public tracking URL token
   isSample            Boolean           @default(false)
@@ -127,15 +129,18 @@ model Stage {
 }
 
 model StageEvent {
-  id            String    @id @default(cuid())
-  lotId         String
-  lot           FiberLot  @relation(fields: [lotId], references: [id], onDelete: Cascade)
-  stageId       String
-  stage         Stage     @relation(fields: [stageId], references: [id])
-  workerId      String?
-  worker        User?     @relation(fields: [workerId], references: [id])
-  eventType     String    @default("COMPLETED") // COMPLETED | SKIPPED
-  machine       String? // free-text machine/equipment used (registry planned Phase 2)
+  id         String   @id @default(cuid())
+  lotId      String
+  lot        FiberLot @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  stageId    String
+  stage      Stage    @relation(fields: [stageId], references: [id])
+  workerId   String?
+  worker     User?    @relation(fields: [workerId], references: [id])
+  eventType  String   @default("COMPLETED") // COMPLETED | SKIPPED
+  // Registry machine for new events; legacy free-text kept for old records.
+  machineId  String?
+  machineRef Machine? @relation(fields: [machineId], references: [id])
+  machine    String?
   inputWeightG  Int?
   outputWeightG Int?
   notes         String?
@@ -235,6 +240,20 @@ model Invoice {
   updatedAt       DateTime  @updatedAt
 
   @@index([status])
+}
+
+model Machine {
+  id         String       @id @default(cuid())
+  name       String
+  type       String // Washer | Carder | Spinning Frame | Drum Carder | Dye Bath | Other (free text)
+  capacityKg Float        @default(0)
+  status     String       @default("AVAILABLE") // AVAILABLE | IN_USE | MAINTENANCE
+  notes      String?
+  isActive   Boolean      @default(true)
+  isSample   Boolean      @default(false)
+  stageEvents StageEvent[]
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
 }
 
 model Payment {

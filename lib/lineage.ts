@@ -2,6 +2,7 @@ import { prisma } from "./db";
 import type { Prisma } from "@prisma/client";
 import { AppError } from "./errors";
 import { pathExists, type Edge } from "./graph";
+import { recalcOrderEta } from "./production";
 
 const SPLITTABLE = ["PENDING", "IN_PRODUCTION", "ON_HOLD"];
 
@@ -102,6 +103,11 @@ export async function splitLot(input: {
         : { currentWeightG: parent.currentWeightG - sum },
     });
   });
+  try {
+    await recalcOrderEta(parent.orderId);
+  } catch (err) {
+    console.error("[eta] recalc after split failed", err);
+  }
   return childIds;
 }
 
@@ -192,6 +198,15 @@ export async function blendLots(input: {
     }
     return batch.id;
   });
+  // Weights moved between orders — refresh every affected order's ETA.
+  const orderIds = [...new Set(lots.map((l) => l.orderId))];
+  for (const orderId of orderIds) {
+    try {
+      await recalcOrderEta(orderId);
+    } catch (err) {
+      console.error("[eta] recalc after blend failed", err);
+    }
+  }
   return batchId;
 }
 

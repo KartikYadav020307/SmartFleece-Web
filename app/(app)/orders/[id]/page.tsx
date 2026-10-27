@@ -15,6 +15,7 @@ import {
 import { CopyLink } from "@/components/controls";
 import { OrderStatusSelect } from "@/components/OrderControls";
 import OrderInvoiceCard from "@/components/OrderInvoiceCard";
+import DelayForm from "@/components/DelayForm";
 import { fmtDate, fmtDateTime, fmtWeight } from "@/lib/format";
 import { getPricingConfig } from "@/lib/invoice";
 
@@ -95,13 +96,34 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
           ) : null}
         </Card>
 
-        <Card title="Status">
+        <Card title="Status & ETA">
           <div className="space-y-3">
             <OrderStatusSelect orderId={order.id} status={order.status} />
+            {order.estimatedCompletion && order.status !== "COMPLETED" && order.status !== "CANCELLED" ? (
+              <div className="bg-forest-soft text-forest-dark rounded-lg px-3 py-2.5 text-sm">
+                <p className="font-semibold">
+                  📅 Estimated completion: {fmtDate(order.estimatedCompletion)}
+                  {order.etaConfidenceDays ? ` (±${order.etaConfidenceDays} day${order.etaConfidenceDays > 1 ? "s" : ""})` : ""}
+                </p>
+                <p className="text-xs mt-0.5 opacity-80">
+                  {order.etaBasedOnSamples
+                    ? `Rule-based estimate from ${order.etaBasedOnSamples} of your mill's stage events, adjusted for current queue depth.`
+                    : "Early estimate — refines as the mill processes more fiber."}
+                </p>
+              </div>
+            ) : null}
             <p className="text-xs text-muted">
               Status recalculates automatically as lots move through production. Manual changes are
               for pickup completion or cancellation.
             </p>
+            {order.status === "IN_PRODUCTION" ? (
+              <details className="border border-line rounded-lg p-3 bg-cream/50">
+                <summary className="text-sm font-medium text-ink cursor-pointer">⏳ Log a production delay</summary>
+                <div className="mt-3">
+                  <DelayForm orderId={order.id} />
+                </div>
+              </details>
+            ) : null}
           </div>
         </Card>
       </div>

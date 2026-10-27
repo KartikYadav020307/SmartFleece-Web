@@ -2,6 +2,7 @@ import { prisma } from "./db";
 import { AppError } from "./errors";
 import { isAbnormalLoss, weightLossPct } from "./calc";
 import { notifyCustomer } from "./notify";
+import { buildStageStats, estimateLotHours, millFallback, type StageSample } from "./eta";
 import type { Stage, StageEvent } from "@prisma/client";
 
 export type ActiveStage = Stage;
@@ -19,6 +20,7 @@ export type CompleteStageInput = {
   stageId: string;
   workerId?: string | null;
   eventType: "COMPLETED" | "SKIPPED";
+  machineId?: string;
   machine?: string;
   inputWeightG?: number;
   outputWeightG?: number;
@@ -93,6 +95,7 @@ export async function completeStageEvent(input: CompleteStageInput): Promise<Com
         stageId: stage.id,
         workerId: input.workerId ?? null,
         eventType: input.eventType,
+        machineId: input.machineId ?? null,
         machine: input.machine ?? null,
         inputWeightG: inputW ?? null,
         outputWeightG: outputW ?? null,
@@ -171,6 +174,15 @@ export async function completeStageEvent(input: CompleteStageInput): Promise<Com
     await recalcOrderStatus(result.lot.orderId);
   }
 
+  // Rule-based ETA (Module 3): refresh after every recorded event. It clears
+  // itself once the order has no active lots left. Failures never affect the
+  // recorded event.
+  try {
+    await recalcOrderEta(result.lot.orderId);
+  } catch (err) {
+    console.error(`[eta] recalc failed for order ${result.lot.orderId}`, err);
+  }
+
   return {
     event: result.event,
     duplicate: false,
@@ -207,6 +219,94 @@ export async function undoLastEvent(lotId: string): Promise<void> {
   ]);
 
   await recalcOrderStatus(lot.orderId);
+  try {
+    await recalcOrderEta(lot.orderId);
+  } catch (err) {
+    console.error(`[eta] recalc failed for order ${lot.orderId}`, err);
+  }
+}
+
+/** Wall-clock throughput samples: consecutive completed event pairs per lot. */
+async function historySamples(): Promise<StageSample[]> {
+  const events = await prisma.stageEvent.findMany({
+    where: { revertedAt: null, eventType: "COMPLETED", outputWeightG: { not: null } },
+    orderBy: [{ lotId: "asc" }, { createdAt: "asc" }],
+    select: { lotId: true, stageId: true, createdAt: true, outputWeightG: true },
+  });
+  const samples: StageSample[] = [];
+  for (let i = 1; i < events.length; i++) {
+    const prev = events[i - 1];
+    const cur = events[i];
+    if (prev.lotId !== cur.lotId) continue;
+    const hours = (cur.createdAt.getTime() - prev.createdAt.getTime()) / 3_600_000;
+    if (hours <= 0 || hours > 24 * 30) continue; // ignore stalls longer than 30 days
+    if (!prev.outputWeightG || prev.outputWeightG <= 0) continue;
+    samples.push({
+      stageId: prev.stageId,
+      hoursPerKg: hours / (prev.outputWeightG / 1000),
+      elapsedHours: hours,
+    });
+  }
+  return samples;
+}
+
+/**
+ * Rule-based ETA (Module 3): per remaining stage, median hours/kg × lot kg
+ * plus a queue penalty per other lot waiting at that stage. The order's ETA
+ * is the latest lot estimate; cleared when nothing is active.
+ */
+export async function recalcOrderEta(orderId: string): Promise<void> {
+  const order = await prisma.order.findUnique({ where: { id: orderId }, include: { lots: true } });
+  if (!order) return;
+  const active = order.lots.filter(
+    (l) => ["PENDING", "IN_PRODUCTION", "ON_HOLD"].includes(l.status) && l.currentStageId
+  );
+  if (active.length === 0) {
+    await prisma.order.update({
+      where: { id: orderId },
+      data: { estimatedCompletion: null, etaConfidenceDays: null, etaBasedOnSamples: null },
+    });
+    return;
+  }
+
+  const [stages, samples] = await Promise.all([
+    prisma.stage.findMany({ where: { isActive: true }, orderBy: { sequence: "asc" } }),
+    historySamples(),
+  ]);
+  const stats = buildStageStats(samples);
+  const fallback = millFallback(stats);
+
+  const queue = new Map<string, number>();
+  for (const lot of active) {
+    queue.set(lot.currentStageId!, (queue.get(lot.currentStageId!) ?? 0) + 1);
+  }
+
+  let latest: Date | null = null;
+  let confidenceDays = 0;
+  let basedOnSamples = 0;
+  for (const lot of active) {
+    const idx = stages.findIndex((s) => s.id === lot.currentStageId);
+    const remaining = stages.slice(idx).map((s, j) => ({
+      stageId: s.id,
+      lotsWaiting: Math.max(0, (queue.get(s.id) ?? 0) - (j === 0 ? 1 : 0)),
+    }));
+    const est = estimateLotHours(remaining, lot.currentWeightG / 1000, stats, fallback);
+    const etaMs = Date.now() + est.hours * 3_600_000;
+    if (!latest || etaMs > latest.getTime()) {
+      latest = new Date(etaMs);
+      confidenceDays = est.confidenceDays;
+    }
+    basedOnSamples += est.basedOnSamples;
+  }
+
+  await prisma.order.update({
+    where: { id: orderId },
+    data: {
+      estimatedCompletion: latest,
+      etaConfidenceDays: Math.max(1, Math.ceil(confidenceDays)),
+      etaBasedOnSamples: basedOnSamples,
+    },
+  });
 }
 
 /**
@@ -214,8 +314,7 @@ export async function undoLastEvent(lotId: string): Promise<void> {
  * (COMPLETED / CONSUMED / CANCELLED), the order becomes READY_FOR_PICKUP and
  * the customer is notified once.
  */
-export async function recalcOrderStatus(orderId: string): Promise<string> {
-  const order = await prisma.order.findUnique({ where: { id: orderId }, include: { lots: true, customer: true } });
+export async function recalcOrderStatus(orderId: string): Promise<string> {  const order = await prisma.order.findUnique({ where: { id: orderId }, include: { lots: true, customer: true } });
   if (!order) throw new AppError(404, "Order not found");
   if (order.status === "CANCELLED" || order.status === "COMPLETED") return order.status;
 

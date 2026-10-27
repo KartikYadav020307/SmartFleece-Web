@@ -16,7 +16,7 @@ export default async function DashboardPage() {
       where: { status: { in: ["PENDING", "IN_PRODUCTION", "ON_HOLD"] } },
       include: {
         customer: { select: { name: true } },
-        order: { select: { orderNumber: true } },
+        order: { select: { orderNumber: true, estimatedCompletion: true } },
         currentStage: true,
         stageEvents: { where: { revertedAt: null }, orderBy: { createdAt: "desc" }, take: 1 },
         _count: { select: { qualityFlags: { where: { status: "OPEN" } } } },
@@ -196,7 +196,13 @@ export default async function DashboardPage() {
                           >
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-xs font-bold text-ink">{lot.lotCode}</span>
-                              {lot._count.qualityFlags > 0 ? <span title="Open quality flag">🚩</span> : null}
+                              <span className="flex items-center gap-1">
+                                {lot.order.estimatedCompletion &&
+                                lot.order.estimatedCompletion.getTime() - Date.now() < 3 * 86_400_000 ? (
+                                  <span title="Order due within 3 days">🕐</span>
+                                ) : null}
+                                {lot._count.qualityFlags > 0 ? <span title="Open quality flag">🚩</span> : null}
+                              </span>
                             </div>
                             <p className="text-[11px] text-muted truncate mt-0.5">
                               {lot.customer.name} · {lot.order.orderNumber}

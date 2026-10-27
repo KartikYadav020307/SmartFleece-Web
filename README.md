@@ -43,9 +43,23 @@ small-scale fiber mills. Phase 1 MVP — implemented from
   Unpaid → Partial → Paid status; print-optimized invoice page (browser
   print-to-PDF); revenue analytics on the Reports page. Money is stored as
   integer minor units (paise/cents).
+- **Machine registry & utilization** — machines with capacity/status managed
+  in Settings; workers pick from the registry on stage events (legacy
+  free-text events still display); Production shows kg processed per machine
+  (last 7 days), status badges and the busiest-stage bottleneck hint.
+- **Rule-based ETA (Module 3)** — median wall-clock hours-per-kg per stage
+  from the mill's own stage-event history, plus a queue penalty per waiting
+  lot; shown with a ± confidence range on the order page and customer
+  tracking page, recalculated on every scan; delay logging (reason + days)
+  pushes the ETA and notifies the customer.
+- **Batch planning suggestions (spec 7.3)** — groups queued pre-Carding lots
+  by fiber type + color and suggests shared wash/card runs.
+- **Fiber history across seasons (spec 6.2)** — per-year aggregation of
+  intake, current weight, yield and products on the customer profile.
 - **Customer tracking** — public per-order page behind an unguessable token
-  (`/track/<token>`); shows stages, timestamps, weights and the invoice
-  balance — never worker names, internal notes or costs.
+  (`/track/<token>`); shows stages, timestamps, weights, the ETA with
+  confidence and the invoice balance — never worker names, internal notes or
+  costs.
 - **Notifications** — extensible interface; when `RESEND_API_KEY` and
   `MAIL_FROM` are set, emails are sent via the Resend API and logged as
   SENT/FAILED. Otherwise every notification is recorded in the
@@ -123,19 +137,22 @@ add Row Level Security policies scoped to a `mill_id` before multi-tenant use.
 
 ## Verification actually performed
 
-- `npx vitest run` — **34/34 unit tests** (weight-loss math & auto-flag
+- `npx vitest run` — **44/44 unit tests** (weight-loss math & auto-flag
   threshold, lineage cycle detection/backward tracing, Zod schemas, invoice
   line math with half-up rounding, rush/minimum-fee/extras, tax, payment
-  status transitions, money formatting).
-- `node scripts/e2e.mjs` — **66/66 end-to-end checks, run against the
+  status transitions, money formatting, ETA medians/spread/queue penalties/
+  fallbacks, batch-suggestion grouping, machine utilization aggregation).
+- `node scripts/e2e.mjs` — **83/83 end-to-end checks, run against the
   production build** (`next build` + `next start`): auth lockdown, customer
-  CRUD, multi-lot intake, QR lookup, stage events (weights, machine,
-  idempotency, stale-stage 409, undo), auto quality flag, split (partial
+  CRUD, multi-lot intake, QR lookup, stage events (weights, machine registry
+  link, idempotency, stale-stage 409, undo), auto quality flag, split (partial
   keeps remainder), blend (weight = sum of parents), completing every lot →
-  order auto-flips to READY_FOR_PICKUP, **auto-invoice with verified math**
-  (billable weight, per-lot rates, rush line, GST), payment lifecycle
-  (partial → paid, overpayment 400, regenerate/extras blocked after payment,
-  worker 403s), invoices/reports pages, tracking page with amount due.
+  order auto-flips to READY_FOR_PICKUP, auto-invoice with verified math,
+  payment lifecycle (partial → paid, overpayment 400, regenerate/extras
+  blocked after payment, worker 403s), invoices/reports pages, machine CRUD
+  + utilization + worker 403, ETA populated from history + delay logging
+  shifting it + DELAY notification, batch suggestions, customer fiber
+  history, tracking page with amount due and ± ETA.
 - `npm run build` — clean production build (all 33 routes).
 - Dev-mode caveat: this folder is OneDrive-synced and the dev server
   compiles routes on demand; if a page transiently 500s in dev, it's the
@@ -161,10 +178,10 @@ add Row Level Security policies scoped to a `mill_id` before multi-tenant use.
   reports arrive with more accumulated history.
 - Sample seed data is marked `isSample` and shown with a badge in the UI.
 
-## Next priorities (Phase 2b+)
+## Next priorities (Phase 3 continued)
 
-1. Rule-based ETA estimates from accumulated stage-throughput history.
-2. Machine registry + utilization views.
+1. End-product "fiber story" QR (provenance page per finished lot).
+2. Worker task assignment + productivity views.
 3. Server-side PDF invoice binary (e.g. pdfkit) if print-to-PDF proves
    limiting.
 4. Photo upload at intake (needs a storage bucket).

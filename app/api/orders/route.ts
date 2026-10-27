@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { apiUser, unauthorized } from "@/lib/auth";
 import { orderSchema, firstIssue } from "@/lib/validation";
-import { getStages } from "@/lib/production";
+import { getStages, recalcOrderEta } from "@/lib/production";
 import { notifyCustomer } from "@/lib/notify";
 import { AppError } from "@/lib/errors";
 import { newTrackingToken, newLotCode } from "@/lib/ids";
@@ -115,6 +115,13 @@ export async function POST(req: Request) {
       }
       return created;
     });
+
+    // First rule-based ETA for the new order (Module 3).
+    try {
+      await recalcOrderEta(order.id);
+    } catch (err) {
+      console.error("[eta] initial recalc failed", err);
+    }
 
     await notifyCustomer({
       orderId: order.id,

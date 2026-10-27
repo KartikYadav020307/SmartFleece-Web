@@ -74,6 +74,11 @@ async function fetchPage(path, headers) {
   return res;
 }
 
+// React SSR inserts <!-- --> markers between adjacent text expressions, so
+// rendered strings like "2× Merino Wool" are split in raw HTML. Strip them
+// before substring assertions.
+const textOf = (html) => html.replaceAll(/<!--.*?-->/g, "");
+
 // 0. Unauthenticated access is locked down.
 {
   const saved = cookie;
@@ -525,5 +530,114 @@ let batchId;
   );
 }
 
+// 14. Phase 3 intelligence: machine registry, machineId on stage events,
+// rule-based ETA, delay logging, batch suggestions, customer fiber history.
+{
+  const create1 = await api("POST", "/api/machines", { name: "E2E Carder", type: "Carder", capacityKg: 9 });
+  ok("machine created by owner", create1.status === 201);
+  const machineId = create1.data.machine.id;
+
+  const savedOwner = cookie;
+  await api("POST", "/api/auth/login", { email: "worker@smartfleece.local", password: "demo1234" });
+  const workerMachine = await api("POST", "/api/machines", { name: "Nope", type: "Carder" });
+  ok("worker blocked from creating machines (403)", workerMachine.status === 403);
+  const workerList = await api("GET", "/api/machines");
+  ok("worker can list machines", workerList.status === 200);
+  cookie = savedOwner;
+
+  // Fresh order with two similar queued lots → ETA + suggestions material.
+  const order2res = await api("POST", "/api/orders", {
+    customerId,
+    targetProduct: "Yarn",
+    lots: [
+      { fiberType: "Merino Wool", breed: "Merino", greaseWeightG: 2000, color: "White" },
+      { fiberType: "Merino Wool", breed: "Merino", greaseWeightG: 2000, color: "White" },
+    ],
+  });
+  ok("second order created", order2res.status === 201);
+  const order2 = order2res.data.order;
+
+  const cust = await api("GET", `/api/customers/${customerId}`);
+  const newLots = cust.data.customer.lots.filter((l) => l.order.orderNumber === order2.orderNumber);
+  const lotA = newLots.find((l) => l.currentWeightG === 2000);
+
+  // Record a stage event through the registry machine.
+  const lookupA = await api("GET", `/api/lots/lookup?code=${lotA.lotCode}`);
+  const evt = await api("POST", `/api/lots/${lotA.id}/events`, {
+    stageId: lookupA.data.lot.currentStage.id,
+    eventType: "COMPLETED",
+    machineId,
+    inputWeightG: 2000,
+    outputWeightG: 1900,
+    clientEventId: `e2e-mach-${RUN}`,
+  });
+  ok("stage event recorded with registry machine", evt.status === 200);
+
+  const lotDetail = await api("GET", `/api/lots/${lotA.id}`);
+  ok(
+    "event links to the machine registry entry",
+    lotDetail.data.lot.stageEvents.some((e) => e.machineId === machineId)
+  );
+
+  // Rule-based ETA on the order after an event.
+  let ord2 = await api("GET", `/api/orders/${order2.id}`);
+  ok(
+    "ETA populated from stage history",
+    Boolean(ord2.data.order.estimatedCompletion) && (ord2.data.order.etaBasedOnSamples ?? 0) > 0,
+    `eta=${ord2.data.order.estimatedCompletion} samples=${ord2.data.order.etaBasedOnSamples}`
+  );
+
+  // Delay logging shifts the ETA and notifies the customer.
+  const oldEta = new Date(ord2.data.order.estimatedCompletion).getTime();
+  const delay = await api("POST", `/api/orders/${order2.id}/delay`, {
+    reason: "MACHINE_BREAKDOWN",
+    extraDays: 2,
+    notes: "e2e delay",
+  });
+  ok("delay logged", delay.status === 200);
+  ord2 = await api("GET", `/api/orders/${order2.id}`);
+  const newEta = new Date(ord2.data.order.estimatedCompletion).getTime();
+  ok("delay pushed the ETA out", newEta >= oldEta + 2 * 86_400_000 - 60_000, `${oldEta} → ${newEta}`);
+  ok(
+    "DELAY notification recorded for the customer",
+    ord2.data.order.notifications.some((n) => n.event === "DELAY")
+  );
+
+  // Production page: utilization + batch suggestion + bottleneck hint.
+  const prodPage = await fetchPage(`${BASE}/production`, { Cookie: cookie });
+  const prodText = textOf(await prodPage.text());
+  ok("production page renders utilization", prodPage.status === 200 && prodText.includes("Machine Utilization") && prodText.includes("E2E Carder"));
+  ok("utilization counts the machine-processed kg", prodText.includes("1.9 kg"), `has1.9=${prodText.includes("1.9")}`);
+  ok(
+    "batch suggestion groups the two queued Merino lots",
+    prodText.includes("Batch Planning Suggestions") && /\d+× Merino Wool/.test(prodText),
+    `hasCard=${prodText.includes("Batch Planning Suggestions")} hasGroup=${/\d+× Merino Wool/.test(prodText)}`
+  );
+
+  // Machine guards: history blocks delete; status edit works.
+  const delUsed = await api("DELETE", `/api/machines/${machineId}`);
+  ok("deleting a machine with history rejected (409)", delUsed.status === 409);
+  const patchMach = await api("PATCH", `/api/machines/${machineId}`, { status: "MAINTENANCE" });
+  ok("machine status updated", patchMach.status === 200 && patchMach.data.machine.status === "MAINTENANCE");
+
+  // Tracking page shows the ETA with ± confidence.
+  const track2 = await fetchPage(`${BASE}/track/${ord2.data.order.trackingToken}`);
+  const track2Html = await track2.text();
+  ok(
+    "tracking page shows ETA with ± confidence",
+    track2.status === 200 && track2Html.includes("Estimated completion") && track2Html.includes("±")
+  );
+
+  // Customer fiber history across seasons (seed supplies the 2025 clip).
+  const custPage = await fetchPage(`${BASE}/customers/${customerId}`, { Cookie: cookie });
+  const custText = textOf(await custPage.text());
+  ok(
+    "customer page renders fiber history",
+    custPage.status === 200 && custText.includes("Fiber History Across Seasons") && /\d{4}/.test(custText),
+    `status=${custPage.status} hasTitle=${custText.includes("Fiber History Across Seasons")} hasYear=${/\d{4}/.test(custText)}`
+  );
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
+

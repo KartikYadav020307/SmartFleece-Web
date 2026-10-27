@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { requireUser } from "@/lib/auth";
 import { Card, EmptyState, LotStatusBadge, MetaRow, OrderStatusBadge, PageHeader, SampleBadge } from "@/components/ui";
-import { ConfirmButton } from "@/components/controls";
+import CustomerDeleteButton from "@/components/CustomerDeleteButton";
 import { fmtDate, fmtWeight } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +15,13 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
   const customer = await prisma.customer.findUnique({
     where: { id },
     include: {
-      orders: { orderBy: { createdAt: "desc" }, include: { _count: { select: { lots: true } } } },
+      orders: {
+        orderBy: { createdAt: "desc" },
+        include: {
+          lots: { select: { greaseWeightG: true, currentWeightG: true, fiberType: true } },
+          _count: { select: { lots: true } },
+        },
+      },
       lots: {
         orderBy: { createdAt: "desc" },
         take: 50,
@@ -24,6 +30,22 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
     },
   });
   if (!customer) notFound();
+
+  // Spec 6.2: fiber history across seasons, aggregated per calendar year.
+  const historyByYear = new Map<number, { orders: number; intakeG: number; finishedG: number; products: Set<string>; fibers: Set<string> }>();
+  for (const order of customer.orders) {
+    const year = new Date(order.orderDate).getFullYear();
+    const row = historyByYear.get(year) ?? { orders: 0, intakeG: 0, finishedG: 0, products: new Set<string>(), fibers: new Set<string>() };
+    row.orders += 1;
+    for (const lot of order.lots) {
+      row.intakeG += lot.greaseWeightG;
+      row.finishedG += lot.currentWeightG;
+      row.fibers.add(lot.fiberType);
+    }
+    if (order.targetProduct) row.products.add(order.targetProduct);
+    historyByYear.set(year, row);
+  }
+  const history = [...historyByYear.entries()].sort((a, b) => b[0] - a[0]);
 
   return (
     <div className="space-y-6">
@@ -67,23 +89,55 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
         ) : null}
         {user.role === "OWNER" ? (
           <div className="mt-4 pt-4 border-t border-line">
-            <ConfirmButton
-              className="btn-danger btn-sm"
-              confirmLabel="Really delete/archive?"
-              onConfirm={async () => {
-                await fetch(`/api/customers/${customer.id}`, { method: "DELETE" });
-                window.location.href = "/customers";
-              }}
-            >
-              {customer.orders.length > 0 || customer.lots.length > 0
-                ? "Archive customer (has history)"
-                : "Delete customer"}
-            </ConfirmButton>
-            <p className="text-xs text-muted mt-2">
-              Customers with orders or lots are archived, never deleted, so traceability stays intact.
-            </p>
+            <CustomerDeleteButton
+              customerId={customer.id}
+              hasHistory={customer.orders.length > 0 || customer.lots.length > 0}
+            />
           </div>
         ) : null}
+      </Card>
+
+      <Card title="Fiber History Across Seasons" description="Aggregated from this customer's real orders and lots" padded={false}>
+        {history.length === 0 ? (
+          <EmptyState icon="🐑" title="No fiber history yet" description="Years appear here as orders are received and processed." />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr>
+                  <th className="th">Season</th>
+                  <th className="th">Orders</th>
+                  <th className="th">Fiber</th>
+                  <th className="th">Intake</th>
+                  <th className="th">Weight now</th>
+                  <th className="th">Yield</th>
+                  <th className="th">Products</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map(([year, row]) => (
+                  <tr key={year} className="hover:bg-cream/60">
+                    <td className="td font-semibold">{year}</td>
+                    <td className="td">{row.orders}</td>
+                    <td className="td text-muted">{[...row.fibers].join(", ") || "—"}</td>
+                    <td className="td">{fmtWeight(row.intakeG)}</td>
+                    <td className="td">{fmtWeight(row.finishedG)}</td>
+                    <td className="td">
+                      {row.intakeG > 0 ? (
+                        <span className={row.finishedG / row.intakeG < 0.4 ? "text-clay" : ""}>
+                          {Math.round((row.finishedG / row.intakeG) * 100)}%
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="td text-muted">{[...row.products].join(", ") || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Card>
 
       <Card title={`Orders (${customer.orders.length})`} padded={false}>

@@ -15,15 +15,19 @@ export type StageEventTarget = {
   status: string;
 };
 
+export type MachineOption = { id: string; name: string };
+
 /**
  * The core worker form: confirm the current stage, record weights and notes.
  * Designed for ≤3 interactions: confirm weight → submit.
  */
 export default function StageEventForm({
   target,
+  machines = [],
   onDone,
 }: {
   target: StageEventTarget;
+  machines?: MachineOption[];
   onDone?: (msg: string) => void;
 }) {
   const router = useRouter();
@@ -32,7 +36,7 @@ export default function StageEventForm({
 
   const [inputWeight, setInputWeight] = useState(String(target.currentWeightG));
   const [outputWeight, setOutputWeight] = useState("");
-  const [machine, setMachine] = useState("");
+  const [machineId, setMachineId] = useState("");
   const [notes, setNotes] = useState("");
   const [flagType, setFlagType] = useState("");
   const [flagSeverity, setFlagSeverity] = useState("MEDIUM");
@@ -61,7 +65,7 @@ export default function StageEventForm({
     const body = JSON.stringify({
       stageId: target.currentStage!.id,
       eventType,
-      machine: machine || undefined,
+      machineId: machineId || undefined,
       inputWeightG: inputWeight || undefined,
       outputWeightG: outputWeight || undefined,
       notes: notes || undefined,
@@ -146,13 +150,24 @@ export default function StageEventForm({
           />
         </Field>
       </div>
-      <Field label="Machine / equipment">
-        <input
-          className="input"
-          value={machine}
-          onChange={(e) => setMachine(e.target.value)}
-          placeholder="Optional — e.g. Washer #2"
-        />
+      <Field label="Machine" hint={machines.length === 0 ? "No machines registered yet — owner can add them in Settings" : undefined}>
+        {machines.length > 0 ? (
+          <select className="input" value={machineId} onChange={(e) => setMachineId(e.target.value)}>
+            <option value="">— not specified —</option>
+            {machines.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            className="input"
+            value={machineId}
+            onChange={(e) => setMachineId(e.target.value)}
+            placeholder="Optional — e.g. Washer #2"
+          />
+        )}
       </Field>
       <Field label="Notes">
         <input

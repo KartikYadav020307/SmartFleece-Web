@@ -14,15 +14,17 @@ import {
 } from "@/components/ui";
 import { CopyLink } from "@/components/controls";
 import { OrderStatusSelect } from "@/components/OrderControls";
+import OrderInvoiceCard from "@/components/OrderInvoiceCard";
 import { fmtDate, fmtDateTime, fmtWeight } from "@/lib/format";
+import { getPricingConfig } from "@/lib/invoice";
 
 export const dynamic = "force-dynamic";
 
 export default async function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  await requireUser();
+  const user = await requireUser();
   const { id } = await params;
 
-  const [order, stages] = await Promise.all([
+  const [order, stages, pricingRow] = await Promise.all([
     prisma.order.findUnique({
       where: { id },
       include: {
@@ -36,13 +38,16 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
           },
         },
         notifications: { orderBy: { createdAt: "desc" } },
+        invoice: { select: { id: true, invoiceNumber: true, totalMinor: true, paidMinor: true, status: true } },
       },
     }),
     getStages(),
+    getPricingConfig(),
   ]);
   if (!order) notFound();
 
   const stageIndex = new Map(stages.map((s, i) => [s.id, i]));
+  const currency = { currencyCode: pricingRow.currencyCode, currencySymbol: pricingRow.currencySymbol };
 
   return (
     <div className="space-y-6">
@@ -153,6 +158,16 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
             })}
           </ul>
         )}
+      </Card>
+
+      <Card title="Invoice">
+        <OrderInvoiceCard
+          orderId={order.id}
+          orderStatus={order.status}
+          invoice={order.invoice}
+          currency={currency}
+          canManage={user.role === "OWNER"}
+        />
       </Card>
 
       <Card title={`Customer Notifications (${order.notifications.length})`} description="Dev mode: recorded here, not emailed">

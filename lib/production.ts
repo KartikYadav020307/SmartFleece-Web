@@ -236,6 +236,15 @@ export async function recalcOrderStatus(orderId: string): Promise<string> {
         subject: `Order ${order.orderNumber} is ready!`,
         body: `Hello ${order.customer.name} — your order ${order.orderNumber} has finished processing and is ready for pickup or shipping.`,
       });
+      // Module 5: the invoice is generated automatically on completion from
+      // actual processed weights. A failure here must never undo the status
+      // change, so it is caught and logged (the owner can generate manually).
+      try {
+        const { generateInvoiceForOrder } = await import("./invoice");
+        await generateInvoiceForOrder(orderId);
+      } catch (err) {
+        console.error(`[invoice] auto-generation failed for order ${orderId}`, err);
+      }
     }
   }
   return next;

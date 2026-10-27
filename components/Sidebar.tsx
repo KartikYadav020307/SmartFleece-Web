@@ -11,7 +11,7 @@ const NAV = [
   { href: "/production", label: "Production", icon: "🏭" },
   { href: "/scan", label: "Scan QR", icon: "📷" },
   { href: "/quality", label: "Quality", icon: "🚩" },
-  { href: "/invoices", label: "Invoices", icon: "💰", soon: true },
+  { href: "/invoices", label: "Invoices", icon: "💰" },
   { href: "/reports", label: "Reports", icon: "📈", soon: true },
   { href: "/settings", label: "Settings", icon: "🔧" },
 ];

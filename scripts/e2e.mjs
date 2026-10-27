@@ -32,15 +32,22 @@ function ok(name, cond, detail = "") {
 }
 
 async function api(method, path, body) {
-  const res = await fetch(BASE + path, {
-    method,
-    headers: {
-      ...(body ? { "Content-Type": "application/json" } : {}),
-      ...(cookie ? { Cookie: cookie } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    redirect: "manual",
-  });
+  const doFetch = () =>
+    fetch(BASE + path, {
+      method,
+      headers: {
+        ...(body ? { "Content-Type": "application/json" } : {}),
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      redirect: "manual",
+    });
+  let res = await doFetch();
+  if (res.status >= 500) {
+    // Transient dev-manifest 500 (OneDrive sync race) — retry once.
+    await new Promise((r) => setTimeout(r, 1500));
+    res = await doFetch();
+  }
   const setCookie = res.headers.get("set-cookie");
   if (setCookie) cookie = setCookie.split(";")[0];
   const text = await res.text();
@@ -54,6 +61,18 @@ async function api(method, path, body) {
 }
 
 console.log(`SmartFleece e2e → ${BASE}\n`);
+
+// Page fetch with retries: this OneDrive-synced folder can transiently
+// truncate .next dev manifests under request bursts (500 from loadManifest),
+// especially on a route's first compile. Production is unaffected.
+async function fetchPage(path, headers) {
+  let res = await fetch(path, { headers, redirect: "manual" });
+  for (let attempt = 0; res.status >= 500 && attempt < 3; attempt++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    res = await fetch(path, { headers, redirect: "manual" });
+  }
+  return res;
+}
 
 // 0. Unauthenticated access is locked down.
 {
@@ -76,10 +95,16 @@ console.log(`SmartFleece e2e → ${BASE}\n`);
 
 // 2. Dashboard renders with seeded data.
 {
-  const page = await fetch(BASE + "/dashboard", { headers: { Cookie: cookie }, redirect: "manual" });
+  const page = await fetchPage(BASE + "/dashboard", { Cookie: cookie });
   const html = await page.text();
-  ok("dashboard renders (200)", page.status === 200);
-  ok("dashboard shows kanban + stats", html.includes("Production Kanban") && html.includes("Order Status Distribution"));
+  ok("dashboard renders (200)", page.status === 200, `status=${page.status} len=${html.length} cookie=${cookie ? "set" : "EMPTY"}`);
+  ok("dashboard shows kanban + stats", html.includes("Production Kanban") && html.includes("Order Status Distribution"), `len=${html.length}`);
+
+  // Pre-warm the remaining staff pages while the server is idle, so their
+  // first dev-mode compilation doesn't collide with later request bursts.
+  for (const warm of ["/invoices", "/reports", "/quality", "/production", "/settings", "/lots", "/orders", "/customers"]) {
+    await fetchPage(BASE + warm, { Cookie: cookie });
+  }
 }
 
 // 3. Create customer.
@@ -307,7 +332,20 @@ let batchId;
 
 // 12. Complete every remaining active lot on the order → the order must
 // auto-flip to READY_FOR_PICKUP and log an ORDER_READY notification.
+// Pricing is configured first so the auto-generated invoice uses known rates.
 {
+  const pricing = await api("PUT", "/api/settings/pricing", {
+    currencyCode: "INR",
+    currencySymbol: "₹",
+    taxLabel: "GST",
+    taxRatePct: 5,
+    rushMultiplier: 1.2,
+    minimumOrderFeeMajor: 0,
+    defaultRateMajorPerKg: 250,
+    baseRatesMajorPerKg: { "Merino Wool": 300 },
+  });
+  ok("owner can configure pricing", pricing.status === 200);
+
   const getOrder = () => api("GET", `/api/orders/${orderId}`);
   const activeLots = (ord) =>
     ord.data.order.lots.filter((l) => ["PENDING", "IN_PRODUCTION"].includes(l.status) && l.currentStageId);
@@ -361,9 +399,130 @@ let batchId;
     ord.data.order.notifications.some((n) => n.event === "ORDER_READY")
   );
 
-  const track = await fetch(`${BASE}/track/${ord.data.order.trackingToken}`);
+  const track = await fetchPage(`${BASE}/track/${ord.data.order.trackingToken}`);
   const html = await track.text();
   ok("tracking page now shows ready state", track.status === 200 && html.includes("Ready for pickup"));
+}
+
+// 13. Invoicing: auto-generated on completion, correct math from configured
+// rates, payment lifecycle, and role/overpayment guards.
+{
+  const roundMinor = (x) => Math.floor(x + 0.5);
+  const RATE = { "Merino Wool": 30000, default: 25000 };
+  const TAX_PCT = 5;
+  const RUSH = 1.2;
+
+  const ord = await api("GET", `/api/orders/${orderId}`);
+  const active = ord.data.order.lots.filter((l) => !["CONSUMED", "CANCELLED"].includes(l.status));
+  const expectedBillable = active.reduce((acc, l) => acc + l.currentWeightG, 0);
+  const expectedProcessing = active.reduce(
+    (acc, l) => acc + roundMinor((l.currentWeightG / 1000) * (RATE[l.fiberType] ?? RATE.default)),
+    0
+  );
+  const expectedRush = roundMinor(expectedProcessing * (RUSH - 1));
+  const expectedSubtotal = expectedProcessing + expectedRush;
+  const expectedTax = roundMinor(expectedSubtotal * (TAX_PCT / 100));
+  const expectedTotal = expectedSubtotal + expectedTax;
+
+  const list = await api("GET", "/api/invoices");
+  const inv = list.data.invoices.find((i) => i.order.orderNumber === orderNumber);
+  ok("invoice auto-generated on order completion", Boolean(inv));
+  ok("invoice status UNPAID", inv?.status === "UNPAID");
+  ok(
+    "billable weight = current weights of non-consumed lots",
+    inv?.billableWeightG === expectedBillable,
+    `got ${inv?.billableWeightG}, expected ${expectedBillable}`
+  );
+  const lines = JSON.parse(inv.lineItemsJson);
+  ok(
+    "one processing line per billable lot at the configured rate",
+    lines.filter((l) => l.kind === "processing").length === active.length &&
+      lines.every((l) => l.kind !== "processing" || l.rateMinorPerKg === (RATE[l.fiberType] ?? RATE.default))
+  );
+  ok("rush surcharge line present (order is rush)", lines.some((l) => l.kind === "rush"));
+  ok(
+    "subtotal/tax/total match independent calculation",
+    inv.subtotalMinor === expectedSubtotal && inv.taxMinor === expectedTax && inv.totalMinor === expectedTotal,
+    `got ${inv.subtotalMinor}/${inv.taxMinor}/${inv.totalMinor}, expected ${expectedSubtotal}/${expectedTax}/${expectedTotal}`
+  );
+  ok("tax labeled GST at 5%", inv.taxLabel === "GST" && inv.taxRatePct === 5);
+
+  // Payment lifecycle (owner).
+  const firstPayment = Math.floor(inv.totalMinor * 0.4);
+  const pay1 = await api("POST", `/api/invoices/${inv.id}/payments`, {
+    amountMajor: firstPayment / 100,
+    method: "UPI",
+    reference: "e2e-upi-1",
+  });
+  ok("partial payment recorded → PARTIAL", pay1.status === 201 && pay1.data.invoice.status === "PARTIAL");
+
+  const overpay = await api("POST", `/api/invoices/${inv.id}/payments`, {
+    amountMajor: (inv.totalMinor - firstPayment) / 100 + 1000,
+  });
+  ok("overpayment rejected (400)", overpay.status === 400);
+
+  const pay2 = await api("POST", `/api/invoices/${inv.id}/payments`, {
+    amountMajor: (inv.totalMinor - firstPayment) / 100,
+    method: "Cash",
+  });
+  ok("final payment recorded → PAID", pay2.status === 201 && pay2.data.invoice.status === "PAID");
+
+  const regen = await api("POST", `/api/invoices/${inv.id}/regenerate`);
+  ok("regenerate blocked after payment (409)", regen.status === 409);
+  const extra = await api("POST", `/api/invoices/${inv.id}/extras`, {
+    description: "late dyeing",
+    amountMajor: 100,
+  });
+  ok("extra charge blocked after payment (409)", extra.status === 409);
+
+  const detail = await api("GET", `/api/invoices/${inv.id}`);
+  ok(
+    "invoice detail shows both payments with attribution",
+    detail.status === 200 &&
+      detail.data.invoice.payments.length === 2 &&
+      detail.data.invoice.payments.every((p) => p.recordedBy === "Asha Kapoor")
+  );
+
+  // Guards for worker role and invoices/reports/tracking pages.
+  const savedOwner = cookie;
+  await api("POST", "/api/auth/login", { email: "worker@smartfleece.local", password: "demo1234" });
+  const workerPay = await api("POST", `/api/invoices/${inv.id}/payments`, { amountMajor: 1 });
+  ok("worker blocked from recording payments (403)", workerPay.status === 403);
+  const workerPricing = await api("PUT", "/api/settings/pricing", {
+    currencyCode: "INR",
+    currencySymbol: "₹",
+    taxLabel: "GST",
+    taxRatePct: 5,
+    rushMultiplier: 1,
+    minimumOrderFeeMajor: 0,
+    defaultRateMajorPerKg: 1,
+    baseRatesMajorPerKg: {},
+  });
+  ok("worker blocked from changing pricing (403)", workerPricing.status === 403);
+  cookie = savedOwner;
+
+  const invoicesPage = await fetchPage(`${BASE}/invoices`, { Cookie: cookie });
+  const invoicesHtml = await invoicesPage.text();
+  ok(
+    "invoices page renders with the invoice",
+    invoicesPage.status === 200 && invoicesHtml.includes(inv.invoiceNumber),
+    `status=${invoicesPage.status} len=${invoicesHtml.length} hasNum=${invoicesHtml.includes(inv.invoiceNumber)}`
+  );
+
+  const reportsPage = await fetchPage(`${BASE}/reports`, { Cookie: cookie });
+  const reportsHtml = await reportsPage.text();
+  ok(
+    "reports page renders collected revenue",
+    reportsPage.status === 200 && reportsHtml.includes("Collected revenue"),
+    `status=${reportsPage.status} len=${reportsHtml.length}`
+  );
+
+  const trackingPage = await fetchPage(`${BASE}/track/${ord.data.order.trackingToken}`);
+  const trackingHtml = await trackingPage.text();
+  ok(
+    "tracking page shows the invoice amount due with configured currency",
+    trackingPage.status === 200 && trackingHtml.includes("₹") && trackingHtml.includes("payable at pickup")
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

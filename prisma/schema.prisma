@@ -71,6 +71,7 @@ model Order {
   isSample            Boolean           @default(false)
   lots                FiberLot[]
   notifications       NotificationLog[]
+  invoice             Invoice?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -185,7 +186,7 @@ model NotificationLog {
   order     Order?   @relation(fields: [orderId], references: [id])
   lotId     String?
   channel   String   @default("EMAIL") // EMAIL | SMS | SYSTEM
-  event     String // ORDER_RECEIVED | STAGE_COMPLETE | ORDER_READY | DELAY | INVOICE
+  event     String // ORDER_RECEIVED | STAGE_COMPLETE | ORDER_READY | DELAY | INVOICE_READY
   recipient String?
   subject   String
   body      String
@@ -194,4 +195,58 @@ model NotificationLog {
   createdAt DateTime @default(now())
 
   @@index([orderId])
+}
+
+// Singleton pricing configuration (one row). Money is stored in minor units
+// (paise/cents) as integers throughout, mirroring the grams-for-weights rule.
+model PricingConfig {
+  id                   String   @id @default(cuid())
+  currencyCode         String   @default("INR")
+  currencySymbol       String   @default("₹")
+  taxLabel             String   @default("GST")
+  taxRatePct           Float    @default(5)
+  rushMultiplier       Float    @default(1.25)
+  minimumOrderFeeMinor Int      @default(0)
+  // { "default": 25000, "Merino Wool": 30000, ... } — minor units per kg
+  baseRatesJson        String   @default("{\"default\":25000}")
+  isSample             Boolean  @default(false)
+  updatedAt            DateTime @updatedAt
+}
+
+model Invoice {
+  id              String    @id @default(cuid())
+  invoiceNumber   String    @unique
+  orderId         String    @unique
+  order           Order     @relation(fields: [orderId], references: [id])
+  billableWeightG Int // snapshot of non-consumed lot weights at generation
+  lineItemsJson   String // [{ description, kind, fiberType?, weightG?, rateMinorPerKg?, amountMinor, manual? }]
+  subtotalMinor   Int
+  taxLabel        String    @default("GST")
+  taxRatePct      Float     @default(0)
+  taxMinor        Int
+  totalMinor      Int
+  paidMinor       Int       @default(0)
+  status          String    @default("UNPAID") // UNPAID | PARTIAL | PAID
+  dueDate         DateTime?
+  notes           String?
+  isSample        Boolean   @default(false)
+  payments        Payment[]
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([status])
+}
+
+model Payment {
+  id          String   @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amountMinor Int
+  method      String   @default("Cash") // Cash | Bank | UPI | Other
+  reference   String?
+  recordedBy  String?
+  paidAt      DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([invoiceId])
 }

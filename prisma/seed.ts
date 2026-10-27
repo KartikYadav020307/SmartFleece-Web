@@ -22,6 +22,9 @@ async function main() {
   console.log("Seeding…");
 
   // Wipe in FK-safe order.
+  await prisma.payment.deleteMany();
+  await prisma.invoice.deleteMany();
+  await prisma.pricingConfig.deleteMany();
   await prisma.notificationLog.deleteMany();
   await prisma.qualityFlag.deleteMany();
   await prisma.lineageEdge.deleteMany();
@@ -221,6 +224,59 @@ async function main() {
     where: { id: o1021.id },
     data: { estimatedCompletion: daysAgo(24), updatedAt: daysAgo(24) },
   });
+
+  // Mill pricing (INR/GST sample) + a fully paid sample invoice for ORD-1021.
+  const config = await prisma.pricingConfig.create({
+    data: {
+      currencyCode: "INR",
+      currencySymbol: "₹",
+      taxLabel: "GST",
+      taxRatePct: 5,
+      rushMultiplier: 1.25,
+      minimumOrderFeeMinor: 0,
+      baseRatesJson: JSON.stringify({ default: 22000, "Merino Wool": 24000, "Huacaya Alpaca": 26000 }),
+      isSample: true,
+    },
+  });
+  const merinoRateMinorPerKg = 24000;
+  const processingMinor = Math.round((w1021 / 1000) * merinoRateMinorPerKg);
+  const invSubtotal = processingMinor;
+  const invTax = Math.round(invSubtotal * 0.05);
+  const invTotal = invSubtotal + invTax;
+  const sampleInvoice = await prisma.invoice.create({
+    data: {
+      invoiceNumber: "INV-1001",
+      orderId: o1021.id,
+      billableWeightG: w1021,
+      lineItemsJson: JSON.stringify([
+        {
+          description: `Processing — ${l1021.lotCode} (Merino Wool, ${(w1021 / 1000).toFixed(2)} kg)`,
+          kind: "processing",
+          fiberType: "Merino Wool",
+          weightG: w1021,
+          rateMinorPerKg: merinoRateMinorPerKg,
+          amountMinor: processingMinor,
+        },
+      ]),
+      subtotalMinor: invSubtotal,
+      taxLabel: "GST",
+      taxRatePct: 5,
+      taxMinor: invTax,
+      totalMinor: invTotal,
+      status: "PAID",
+      paidMinor: invTotal,
+      isSample: true,
+      createdAt: daysAgo(24),
+      updatedAt: daysAgo(20),
+    },
+  });
+  await prisma.payment.createMany({
+    data: [
+      { invoiceId: sampleInvoice.id, amountMinor: 30000, method: "UPI", reference: "UPI/88412093", recordedBy: "Asha Kapoor", paidAt: daysAgo(22) },
+      { invoiceId: sampleInvoice.id, amountMinor: invTotal - 30000, method: "Cash", recordedBy: "Asha Kapoor", paidAt: daysAgo(20) },
+    ],
+  });
+  void config;
   await prisma.qualityFlag.create({
     data: {
       lotId: l1021.id,
@@ -486,6 +542,8 @@ async function main() {
     lineageEdges: await prisma.lineageEdge.count(),
     flags: await prisma.qualityFlag.count(),
     notifications: await prisma.notificationLog.count(),
+    invoices: await prisma.invoice.count(),
+    payments: await prisma.payment.count(),
   };
   console.log("Seed complete:", counts);
   console.log(`Final yield of ORD-1021 lot ${l1021.lotCode}: ${(w1021 / 4200 * 100).toFixed(0)}%`);

@@ -35,12 +35,22 @@ small-scale fiber mills. Phase 1 MVP — implemented from
   all from real persisted data.
 - **Quality** — flag issues from any stage form (VM, felting, color, odor,
   mold, pest, weight…), resolve with attribution.
+- **Invoicing (Module 5)** — configurable pricing (currency, tax label/rate,
+  rush multiplier, minimum fee, per-fiber-type ₹/kg rates); invoices are
+  auto-generated when an order completes, billing **actual processed weight**
+  with per-lot line items, rush surcharge and minimum-order top-up; manual
+  extra charges (e.g. dyeing); payment recording (Cash/Bank/UPI/Other) with
+  Unpaid → Partial → Paid status; print-optimized invoice page (browser
+  print-to-PDF); revenue analytics on the Reports page. Money is stored as
+  integer minor units (paise/cents).
 - **Customer tracking** — public per-order page behind an unguessable token
-  (`/track/<token>`); shows stages, timestamps and weights only — never
-  worker names, internal notes or costs.
-- **Notifications** — extensible interface; in dev mode every customer
-  notification is recorded in the NotificationLog (visible in Settings and on
-  the order page). Nothing is emailed and nothing pretends to be.
+  (`/track/<token>`); shows stages, timestamps, weights and the invoice
+  balance — never worker names, internal notes or costs.
+- **Notifications** — extensible interface; when `RESEND_API_KEY` and
+  `MAIL_FROM` are set, emails are sent via the Resend API and logged as
+  SENT/FAILED. Otherwise every notification is recorded in the
+  NotificationLog in dev mode (visible in Settings and on the order page).
+  Nothing pretends to have been sent.
 
 ## Quick start
 
@@ -78,6 +88,10 @@ Sample logins (seeded, marked `sample` — change before real use):
 
 ```
 DATABASE_URL="file:./dev.db"   # SQLite for zero-config local dev
+
+# Optional — real email via Resend (https://resend.com, free tier):
+# RESEND_API_KEY="re_xxxxxxxxxxxx"
+# MAIL_FROM="SmartFleece <onboarding@resend.dev>"
 ```
 
 ### Switching to Supabase / Postgres
@@ -109,26 +123,28 @@ add Row Level Security policies scoped to a `mill_id` before multi-tenant use.
 
 ## Verification actually performed
 
-- `npx vitest run` — **22/22 unit tests** (weight-loss math & auto-flag
-  threshold, lineage cycle detection/backward tracing, Zod schemas).
-- `node scripts/e2e.mjs` — **47/47 end-to-end checks** against the running
-  dev server: auth lockdown, wrong-password rejection, customer
-  CRUD + validation, multi-lot order intake, QR lookup (valid/invalid),
-  stage events (weight delta, machine field, duplicate-scan idempotency,
-  stale-stage 409, undo restoring stage & weight), auto quality flag,
-  partial split (remainder kept), over-allocation rejection, blend weight =
-  sum of parents, parents consumed, single-lot blend rejected, flag
-  lifecycle, tracking page (valid token shows the order and hides internal
-  data; invalid token shows nothing), worker role restrictions, and driving
-  every remaining lot to completion flips the order to READY_FOR_PICKUP with
-  an ORDER_READY notification.
+- `npx vitest run` — **34/34 unit tests** (weight-loss math & auto-flag
+  threshold, lineage cycle detection/backward tracing, Zod schemas, invoice
+  line math with half-up rounding, rush/minimum-fee/extras, tax, payment
+  status transitions, money formatting).
+- `node scripts/e2e.mjs` — **66/66 end-to-end checks, run against the
+  production build** (`next build` + `next start`): auth lockdown, customer
+  CRUD, multi-lot intake, QR lookup, stage events (weights, machine,
+  idempotency, stale-stage 409, undo), auto quality flag, split (partial
+  keeps remainder), blend (weight = sum of parents), completing every lot →
+  order auto-flips to READY_FOR_PICKUP, **auto-invoice with verified math**
+  (billable weight, per-lot rates, rush line, GST), payment lifecycle
+  (partial → paid, overpayment 400, regenerate/extras blocked after payment,
+  worker 403s), invoices/reports pages, tracking page with amount due.
 - `npm run build` — clean production build (all 33 routes).
+- Dev-mode caveat: this folder is OneDrive-synced and the dev server
+  compiles routes on demand; if a page transiently 500s in dev, it's the
+  sync race — the production build is unaffected.
 
 ## Known limitations
 
-- **Notifications are dev-mode** — recorded in the database, never emailed.
-  Wire an SMTP provider inside `lib/notify.ts` (statuses LOGGED/SENT/FAILED
-  already exist).
+- **Notifications** send via Resend only when `RESEND_API_KEY` + `MAIL_FROM`
+  are configured; otherwise they are recorded in dev mode (by design).
 - **Photos** are not implemented (schema field reserved; no storage bucket
   configured).
 - **Offline queue** is implemented with localStorage + server idempotency and
@@ -138,20 +154,17 @@ add Row Level Security policies scoped to a `mill_id` before multi-tenant use.
   events for now.
 - **Cross-order blends**: the batch carries the first parent's order number;
   full lineage remains queryable from every parent lot.
-- **Invoices / Reports** are explicitly marked as upcoming pages.
-- **OneDrive caveat**: this project folder is OneDrive-synced, and OneDrive
-  can transiently truncate `.next` dev-cache manifests during compile bursts
-  (dev server returns a 500 from `loadManifest`). It self-heals; the e2e
-  script retries once for this reason. For smooth development, exclude
-  `.next` from sync or pause OneDrive during heavy dev use. Production
-  `next start` is unaffected.
+- **Invoices** print via the browser's print-to-PDF (no server-side PDF
+  binary yet); payments are recorded manually — online payment collection
+  (Stripe) is a future phase.
+- **Reports** currently cover financial analytics only; production/quality
+  reports arrive with more accumulated history.
 - Sample seed data is marked `isSample` and shown with a badge in the UI.
 
-## Next priorities (Phase 2)
+## Next priorities (Phase 2b+)
 
-1. Invoice generation + payment status (Module 5) — processed weights are
-   already captured per stage.
-2. Email provider integration for notifications.
-3. ETA estimates from stage-throughput history (stage-event data already
-   accumulates).
-4. Machine registry + utilization views.
+1. Rule-based ETA estimates from accumulated stage-throughput history.
+2. Machine registry + utilization views.
+3. Server-side PDF invoice binary (e.g. pdfkit) if print-to-PDF proves
+   limiting.
+4. Photo upload at intake (needs a storage bucket).

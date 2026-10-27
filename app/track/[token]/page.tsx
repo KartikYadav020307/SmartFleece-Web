@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/db";
 import { getStages } from "@/lib/production";
+import { getPricingConfig } from "@/lib/invoice";
+import { formatMoney } from "@/lib/money";
 import { fmtDate, fmtDateTime, fmtWeight } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -47,7 +49,15 @@ export default async function TrackPage({ params }: { params: Promise<{ token: s
     );
   }
 
-  const stages = await getStages();
+  const [stages, pricingRow, invoice] = await Promise.all([
+    getStages(),
+    getPricingConfig(),
+    prisma.invoice.findUnique({
+      where: { orderId: order.id },
+      select: { invoiceNumber: true, totalMinor: true, paidMinor: true, status: true },
+    }),
+  ]);
+  const currency = { currencyCode: pricingRow.currencyCode, currencySymbol: pricingRow.currencySymbol };
   const fiberTypes = [...new Set(order.lots.map((l) => l.fiberType))];
   const intakeG = order.lots.reduce((acc, l) => acc + l.greaseWeightG, 0);
   const currentG = order.lots.reduce((acc, l) => acc + l.currentWeightG, 0);
@@ -100,6 +110,33 @@ export default async function TrackPage({ params }: { params: Promise<{ token: s
             </p>
           ) : null}
         </div>
+
+        {invoice ? (
+          <div className="card p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-widest text-muted">Invoice {invoice.invoiceNumber}</p>
+                <p className="text-sm text-ink mt-1">
+                  Total <strong>{formatMoney(invoice.totalMinor, currency)}</strong>
+                  {invoice.paidMinor > 0 ? (
+                    <>
+                      {" "}· paid <strong>{formatMoney(invoice.paidMinor, currency)}</strong>
+                    </>
+                  ) : null}{" "}
+                  · due <strong>{formatMoney(Math.max(0, invoice.totalMinor - invoice.paidMinor), currency)}</strong>{" "}
+                  <span className="text-muted">(payable at pickup)</span>
+                </p>
+              </div>
+              <span
+                className={`badge ${
+                  invoice.status === "PAID" ? "bg-forest-soft text-forest-dark" : "bg-amber-soft text-amber"
+                }`}
+              >
+                {invoice.status === "PAID" ? "paid ✓" : invoice.status === "PARTIAL" ? "partially paid" : "due at pickup"}
+              </span>
+            </div>
+          </div>
+        ) : null}
 
         {order.lots.map((lot) => {
           const currentIdx = stages.findIndex((s) => s.id === lot.currentStageId);

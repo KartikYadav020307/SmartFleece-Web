@@ -1,8 +1,10 @@
 import { prisma } from "@/lib/db";
 import { requireUser } from "@/lib/auth";
 import { getAllStages } from "@/lib/production";
+import { getPricingConfig, parseRates } from "@/lib/invoice";
 import { Badge, Card, PageHeader } from "@/components/ui";
 import StageEditor from "@/components/StageEditor";
+import PricingEditor from "@/components/PricingEditor";
 import { fmtDateTime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -11,15 +13,25 @@ export default async function SettingsPage() {
   const user = await requireUser();
   const isOwner = user.role === "OWNER";
 
-  const [stages, users, notifications] = await Promise.all([
+  const [stages, users, notifications, pricingRow] = await Promise.all([
     getAllStages(),
     prisma.user.findMany({ orderBy: { role: "asc" }, select: { id: true, name: true, email: true, role: true, isSample: true } }),
     prisma.notificationLog.findMany({ orderBy: { createdAt: "desc" }, take: 15, include: { order: { select: { orderNumber: true } } } }),
+    getPricingConfig(),
   ]);
+  const pricing = {
+    currencyCode: pricingRow.currencyCode,
+    currencySymbol: pricingRow.currencySymbol,
+    taxLabel: pricingRow.taxLabel,
+    taxRatePct: pricingRow.taxRatePct,
+    rushMultiplier: pricingRow.rushMultiplier,
+    minimumOrderFeeMinor: pricingRow.minimumOrderFeeMinor,
+    rates: parseRates(pricingRow.baseRatesJson),
+  };
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Settings" description="Mill configuration — owner access for stage editing." />
+      <PageHeader title="Settings" description="Mill configuration — owner access for stage and pricing editing." />
 
       {!isOwner ? (
         <p className="text-sm text-amber bg-amber-soft rounded-lg px-3 py-2">
@@ -53,6 +65,13 @@ export default async function SettingsPage() {
             ))}
           </ol>
         )}
+      </Card>
+
+      <Card
+        title="Pricing & Invoicing"
+        description="Invoices bill actual processed weight at these rates. Currency and tax are fully configurable."
+      >
+        <PricingEditor pricing={pricing} isOwner={isOwner} />
       </Card>
 
       <div className="grid lg:grid-cols-2 gap-4">

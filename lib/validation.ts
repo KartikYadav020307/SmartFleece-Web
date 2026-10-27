@@ -129,6 +129,33 @@ export const lotUpdateSchema = z.object({
   notes: optionalString,
 });
 
+export const pricingSchema = z.object({
+  currencyCode: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z]{3}$/, "Currency code must be 3 letters (e.g. INR, USD)")
+    .transform((v) => v.toUpperCase()),
+  currencySymbol: z.string().trim().min(1, "Currency symbol is required").max(4),
+  taxLabel: z.string().trim().min(1, "Tax label is required").max(20),
+  taxRatePct: z.coerce.number().min(0, "Tax rate cannot be negative").max(100),
+  rushMultiplier: z.coerce.number().min(1, "Rush multiplier must be at least 1").max(5),
+  minimumOrderFeeMajor: z.coerce.number().min(0, "Minimum order fee cannot be negative"),
+  defaultRateMajorPerKg: z.coerce.number().min(0, "Rate cannot be negative"),
+  baseRatesMajorPerKg: z.record(z.string(), z.coerce.number().min(0)),
+});
+
+export const paymentSchema = z.object({
+  amountMajor: z.coerce.number().positive("Payment amount must be greater than zero"),
+  method: z.enum(["Cash", "Bank", "UPI", "Other"]).default("Cash"),
+  reference: optionalString,
+  paidAt: optionalDate,
+});
+
+export const extraChargeSchema = z.object({
+  description: z.string().trim().min(1, "Description is required").max(120),
+  amountMajor: z.coerce.number().positive("Amount must be greater than zero"),
+});
+
 export function firstIssue(error: z.ZodError): string {
   const issue = error.issues[0];
   return issue ? `${issue.path.join(".") || "input"}: ${issue.message}` : "Invalid input";

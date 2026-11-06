@@ -1,6 +1,6 @@
 import { prisma } from "./db";
 import { AppError } from "./errors";
-import { isAbnormalLoss, weightLossPct } from "./calc";
+import { isAbnormalLoss, weightLossPct, LOSS_DEVIATION_THRESHOLD } from "./calc";
 import { notifyCustomer } from "./notify";
 import { buildStageStats, estimateLotHours, millFallback, type StageSample } from "./eta";
 import type { Stage, StageEvent } from "@prisma/client";
@@ -116,8 +116,13 @@ export async function completeStageEvent(input: CompleteStageInput): Promise<Com
       });
     }
 
-    // Spec 2.5: auto-flag abnormal weight loss (>15 points above expected).
-    if (inputW && outputW) {
+    // Spec 2.5: auto-flag abnormal weight change — loss far above or below
+    // the stage's expected loss, including implausible gain. Evaluate when a
+    // positive input weight and a DEFINED output weight exist; an output of
+    // zero is a real total-loss anomaly and must be flagged, not skipped.
+    // Undefined weights (skipped events, or worker left output blank) are
+    // simply not evaluated.
+    if (inputW !== undefined && inputW > 0 && outputW !== undefined) {
       const lossPct = weightLossPct(inputW, outputW);
       if (isAbnormalLoss(lossPct, stage.expectedLossPct)) {
         await tx.qualityFlag.create({
@@ -126,14 +131,20 @@ export async function completeStageEvent(input: CompleteStageInput): Promise<Com
             stageEventId: event.id,
             flagType: "WEIGHT",
             severity: "LOW",
-            notes: `Automatic alert: ${lossPct.toFixed(1)}% weight change at ${stage.name} vs ${stage.expectedLossPct}% expected.`,
+            notes: `Automatic alert: weight ${lossPct >= 0 ? "loss" : "gain"} of ${Math.abs(lossPct).toFixed(1)}% at ${stage.name} vs ${stage.expectedLossPct}% expected (±${LOSS_DEVIATION_THRESHOLD} pts).`,
           },
         });
       }
     }
 
     const nextStage = stages[idx + 1] ?? null;
-    const completed = !nextStage;
+    const latestQC = await tx.qCInspection.findFirst({
+      where: { lotId: lot.id },
+      orderBy: { createdAt: "desc" },
+    });
+    // Decoupled completion: terminal stage requires a passing QC inspection to mark COMPLETED
+    const hasPassingQC = Boolean(latestQC && latestQC.outcome === "PASS");
+    const completed = !nextStage && hasPassingQC;
 
     await tx.fiberLot.update({
       where: { id: lot.id },
@@ -314,13 +325,16 @@ export async function recalcOrderEta(orderId: string): Promise<void> {
  * (COMPLETED / CONSUMED / CANCELLED), the order becomes READY_FOR_PICKUP and
  * the customer is notified once.
  */
-export async function recalcOrderStatus(orderId: string): Promise<string> {  const order = await prisma.order.findUnique({ where: { id: orderId }, include: { lots: true, customer: true } });
+export async function recalcOrderStatus(orderId: string): Promise<string> {
+  const order = await prisma.order.findUnique({ where: { id: orderId }, include: { lots: true, customer: true } });
   if (!order) throw new AppError(404, "Order not found");
   if (order.status === "CANCELLED" || order.status === "COMPLETED") return order.status;
 
   const done = (s: string) => s === "COMPLETED" || s === "CONSUMED" || s === "CANCELLED";
   let next = order.status;
-  if (order.lots.length > 0 && order.lots.every((l) => done(l.status))) {
+  if (order.lots.length > 0 && order.lots.every((l) => l.status === "CANCELLED")) {
+    next = "CANCELLED";
+  } else if (order.lots.length > 0 && order.lots.every((l) => done(l.status))) {
     next = "READY_FOR_PICKUP";
   } else if (order.lots.some((l) => l.status === "IN_PRODUCTION" || l.status === "PENDING" || l.status === "ON_HOLD")) {
     next = "IN_PRODUCTION";

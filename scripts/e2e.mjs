@@ -392,6 +392,15 @@ let batchId;
         loopError = `${lot.lotCode}: ${res.status} ${typeof res.data === "string" ? "server error" : JSON.stringify(res.data)}`;
         break;
       }
+      if (res.data?.nextStageName === null && res.data?.lotStatus !== "COMPLETED") {
+        await api("POST", `/api/lots/${lot.id}/qc`, {
+          outcome: "PASS",
+          measuredWeightG: lot.currentWeightG,
+          actualPly: 2,
+          actualTwist: "Z",
+          visualGrade: "PASS",
+        });
+      }
     }
     if (loopError) break;
     ord = await getOrder();
@@ -628,6 +637,105 @@ let batchId;
     track2.status === 200 && track2Html.includes("Estimated completion") && track2Html.includes("±")
   );
 
+  // ETA recalculates on lot-status change. Dedicated order 3: order 2 above
+  // had its ETA manually extended via the delay endpoint, and any later
+  // recalculation legitimately overwrites a manual extension, which would
+  // make this check a false positive. Both order-3 lots sit at the same early
+  // stage with identical weights, so the cancelled lot deterministically
+  // contributes to the order's maximum ETA (each carries a queue penalty for
+  // the other).
+  const order3res = await api("POST", "/api/orders", {
+    customerId,
+    targetProduct: "Yarn",
+    lots: [
+      { fiberType: "Merino Wool", greaseWeightG: 2500, color: "White" },
+      { fiberType: "Merino Wool", greaseWeightG: 2500, color: "White" },
+    ],
+  });
+  ok("order 3 created for status-change ETA test", order3res.status === 201);
+  const order3 = order3res.data.order;
+  const ord3a = await api("GET", `/api/orders/${order3.id}`);
+  ok("order 3 has an initial rule-based ETA", Boolean(ord3a.data.order.estimatedCompletion));
+  const etaBefore = new Date(ord3a.data.order.estimatedCompletion).getTime();
+
+  const cust3 = await api("GET", `/api/customers/${customerId}`);
+  const lots3 = cust3.data.customer.lots.filter((l) => l.order.orderNumber === order3.orderNumber);
+  ok("order 3 has two active lots", lots3.length === 2 && lots3.every((l) => l.status === "PENDING"));
+
+  const cancelRes = await api("PATCH", `/api/lots/${lots3[0].id}`, { status: "CANCELLED" });
+  ok("one lot cancelled via status change", cancelRes.status === 200 && cancelRes.data.lot.status === "CANCELLED");
+
+  const ord3b = await api("GET", `/api/orders/${order3.id}`);
+  const etaAfter = new Date(ord3b.data.order.estimatedCompletion).getTime();
+  ok("ETA decreased after cancellation (not stale)", etaAfter < etaBefore, `${etaBefore} → ${etaAfter}`);
+  ok(
+    "order status remains IN_PRODUCTION with one active lot",
+    ord3b.data.order.status === "IN_PRODUCTION",
+    `got ${ord3b.data.order.status}`
+  );
+
+  // Complete every stage of the remaining active lot in order 3:
+  // prove that when every active lot completes (even with another lot cancelled),
+  // the order transitions to READY_FOR_PICKUP and logs an ORDER_READY notification.
+  let remLot = ord3b.data.order.lots.find((l) => l.id === lots3[1].id);
+  let g = 0;
+  while (remLot && remLot.status !== "COMPLETED" && remLot.currentStageId && g < 30) {
+    const res = await api("POST", `/api/lots/${remLot.id}/events`, {
+      stageId: remLot.currentStageId,
+      eventType: "COMPLETED",
+      inputWeightG: remLot.currentWeightG,
+      outputWeightG: remLot.currentWeightG,
+      clientEventId: `e2e-ord3-finish-${RUN}-${g}`,
+    });
+    if (res.status !== 200) break;
+    if (res.data?.nextStageName === null && res.data?.lotStatus !== "COMPLETED") {
+      await api("POST", `/api/lots/${remLot.id}/qc`, {
+        outcome: "PASS",
+        measuredWeightG: remLot.currentWeightG,
+        visualGrade: "PASS",
+      });
+    }
+    const refreshedOrd = await api("GET", `/api/orders/${order3.id}`);
+    remLot = refreshedOrd.data.order.lots.find((l) => l.id === lots3[1].id);
+    g++;
+  }
+  const ord3c = await api("GET", `/api/orders/${order3.id}`);
+  ok("remaining lot in order 3 reached COMPLETED", remLot?.status === "COMPLETED");
+  ok(
+    "order 3 auto-flips to READY_FOR_PICKUP when last active lot completes",
+    ord3c.data.order.status === "READY_FOR_PICKUP",
+    `got ${ord3c.data.order.status}`
+  );
+  ok(
+    "ORDER_READY notification logged for order 3",
+    ord3c.data.order.notifications.some((n) => n.event === "ORDER_READY")
+  );
+
+  // Order 4: when ALL lots in an order are cancelled, the order must transition
+  // to CANCELLED (not READY_FOR_PICKUP) and must NOT emit an ORDER_READY notification.
+  const order4res = await api("POST", "/api/orders", {
+    customerId,
+    targetProduct: "Roving",
+    lots: [{ fiberType: "Merino Wool", greaseWeightG: 1000, color: "White" }],
+  });
+  ok("order 4 created for all-cancelled test", order4res.status === 201);
+  const order4 = order4res.data.order;
+  const cust4 = await api("GET", `/api/customers/${customerId}`);
+  const lot4 = cust4.data.customer.lots.find((l) => l.order.orderNumber === order4.orderNumber);
+  const cancel4 = await api("PATCH", `/api/lots/${lot4.id}`, { status: "CANCELLED" });
+  ok("order 4 lot cancelled", cancel4.status === 200 && cancel4.data.lot.status === "CANCELLED");
+
+  const ord4 = await api("GET", `/api/orders/${order4.id}`);
+  ok(
+    "order 4 transitions to CANCELLED when all lots cancelled",
+    ord4.data.order.status === "CANCELLED",
+    `got ${ord4.data.order.status}`
+  );
+  ok(
+    "order 4 emits no ORDER_READY notification",
+    !ord4.data.order.notifications.some((n) => n.event === "ORDER_READY")
+  );
+
   // Customer fiber history across seasons (seed supplies the 2025 clip).
   const custPage = await fetchPage(`${BASE}/customers/${customerId}`, { Cookie: cookie });
   const custText = textOf(await custPage.text());
@@ -636,6 +744,240 @@ let batchId;
     custPage.status === 200 && custText.includes("Fiber History Across Seasons") && /\d{4}/.test(custText),
     `status=${custPage.status} hasTitle=${custText.includes("Fiber History Across Seasons")} hasYear=${/\d{4}/.test(custText)}`
   );
+}
+
+// 15. Module 6.3: Finished-product "fiber story" QR and public provenance.
+{
+  // Story label page (staff authenticated) for a finished split child lot.
+  const labelRes = await fetchPage(`${BASE}/label/${splitChildId}/story`, { Cookie: cookie });
+  const labelHtml = await labelRes.text();
+  ok(
+    "story label page renders with provenance header",
+    labelRes.status === 200 && labelHtml.includes("SmartFleece Provenance") && labelHtml.includes("The Fiber Story")
+  );
+
+  // Extract public story URL token from the label page.
+  const tokenMatch = labelHtml.match(/\/story\/(st_[a-f0-9_]+)/);
+  ok("story label embeds opaque st_ token", Boolean(tokenMatch && tokenMatch[1]));
+  const storyToken = tokenMatch ? tokenMatch[1] : "";
+
+  // Public customer access: unauthenticated (no cookie).
+  const storyRes = await fetch(`${BASE}/story/${storyToken}`);
+  const storyHtml = await storyRes.text();
+  ok("public fiber story renders without authentication (200)", storyRes.status === 200 && storyHtml.includes("The Fiber Story"));
+  ok("fiber story shows clean yield and product details", storyHtml.includes("Clean Yield") && storyHtml.includes("Finished Weight"));
+  ok("fiber story shows farm origin and breed", storyHtml.includes("Farm Origin") && (storyHtml.includes("Merino") || storyHtml.includes("Alpaca")));
+  ok("fiber story shows processing stages", storyHtml.includes("Mill Processing Journey"));
+
+  // Privacy verification: public story hides worker names, customer personal details, and internal financials.
+  ok(
+    "fiber story hides worker names, customer contacts, and internal prices",
+    !storyHtml.includes("Sam Carder") &&
+      !storyHtml.includes("worker@") &&
+      !storyHtml.includes("owner@") &&
+      !storyHtml.includes("Internal") &&
+      !storyHtml.includes("Invoice") &&
+      !storyHtml.includes("₹")
+  );
+
+  // Invalid token shows friendly not-found certificate.
+  const invalidStory = await fetch(`${BASE}/story/st_bad000000_deadbeef_0000`);
+  const invalidHtml = await invalidStory.text();
+  ok(
+    "invalid story token shows provenance not found page",
+    invalidStory.status === 200 && invalidHtml.includes("Provenance Record Not Found")
+  );
+
+  // Artisan blend provenance for the blended batch lot.
+  const batchLabelRes = await fetchPage(`${BASE}/label/${batchId}/story`, { Cookie: cookie });
+  const batchLabelHtml = await batchLabelRes.text();
+  const batchTokenMatch = batchLabelHtml.match(/\/story\/(st_[a-f0-9_]+)/);
+  ok("batch story label generates valid token", Boolean(batchTokenMatch && batchTokenMatch[1]));
+  if (batchTokenMatch) {
+    const batchStoryRes = await fetch(`${BASE}/story/${batchTokenMatch[1]}`);
+    const batchStoryHtml = await batchStoryRes.text();
+    ok(
+      "batch story page renders Artisan Blend badge",
+      batchStoryRes.status === 200 && batchStoryHtml.includes("Artisan Blend")
+    );
+  }
+
+  // Staff lot page exposes the Fiber Story card and preview link.
+  const lotPage = await fetchPage(`${BASE}/lots/${splitChildId}`, { Cookie: cookie });
+  const lotHtml = await lotPage.text();
+  ok(
+    "staff lot page renders Fiber Story card and links",
+    lotPage.status === 200 && lotHtml.includes("The Fiber Story (Module 6.3)") && lotHtml.includes("Preview Public Fiber Story")
+  );
+}
+
+// 16. Structured Finished-Goods QC Checklist (Module 6.4)
+{
+  console.log("\n  --- Structured Finished-Goods QC Checklist ---");
+  // Dedicated Order 5 for structured QC testing
+  const order5res = await api("POST", "/api/orders", {
+    customerId,
+    targetProduct: "Yarn",
+    yarnSpecs: "Worsted weight, 3-ply, Z-twist",
+    lots: [
+      { fiberType: "Huacaya Alpaca", greaseWeightG: 2000, color: "Brown" },
+    ],
+  });
+  ok("order 5 created for QC workflow testing", order5res.status === 201);
+  const order5 = order5res.data.order;
+  const cust5 = await api("GET", `/api/customers/${customerId}`);
+  const lot5 = cust5.data.customer.lots.find((l) => l.order.orderNumber === order5.orderNumber);
+  ok("lot 5 found in initial PENDING status", Boolean(lot5) && lot5.status === "PENDING");
+
+  // 1. Gate: Story label blocked before QC
+  const storyLabelRes = await fetchPage(`${BASE}/label/${lot5.id}/story`, { Cookie: cookie });
+  const storyLabelHtml = await storyLabelRes.text();
+  ok(
+    "story label is blocked before passing QC",
+    storyLabelRes.status === 200 &&
+      storyLabelHtml.includes("Finished-Goods QC Required") &&
+      !storyLabelHtml.includes("Print story tag")
+  );
+
+  // 2. Gate: Direct PATCH to COMPLETED blocked without QC
+  const patchPremature = await api("PATCH", `/api/lots/${lot5.id}`, { status: "COMPLETED" });
+  ok("premature PATCH to COMPLETED is blocked (400)", patchPremature.status === 400);
+
+  // 3. Validation: Missing measuredWeightG on PASS is rejected
+  const qcNoWeight = await api("POST", `/api/lots/${lot5.id}/qc`, { outcome: "PASS" });
+  ok("QC PASS without measuredWeightG rejected (400)", qcNoWeight.status === 400);
+
+  // 4. Validation: PASS with visualGrade REJECT is rejected
+  const qcRejectPass = await api("POST", `/api/lots/${lot5.id}/qc`, {
+    outcome: "PASS",
+    measuredWeightG: 1900,
+    visualGrade: "REJECT",
+  });
+  ok("QC PASS with visualGrade REJECT rejected (400)", qcRejectPass.status === 400);
+
+  // 5. Validation: REWORK/HOLD/FAIL without notes rejected
+  const qcNoNotes = await api("POST", `/api/lots/${lot5.id}/qc`, { outcome: "REWORK" });
+  ok("QC REWORK without notes rejected (400)", qcNoNotes.status === 400);
+
+  // 6. Outcome: REWORK keeps lot in production and blocks completion
+  const qcRework = await api("POST", `/api/lots/${lot5.id}/qc`, {
+    outcome: "REWORK",
+    measuredWeightG: 1950,
+    notes: "Uneven twist on spindle 3",
+  });
+  ok("QC REWORK recorded (201)", qcRework.status === 201);
+  const lotAfterRework = await api("GET", `/api/lots/${lot5.id}`);
+  ok("lot remains IN_PRODUCTION after REWORK", lotAfterRework.data.lot.status !== "COMPLETED");
+
+  // 7. Outcome: HOLD transitions lot to ON_HOLD
+  const qcHold = await api("POST", `/api/lots/${lot5.id}/qc`, {
+    outcome: "HOLD",
+    measuredWeightG: 1950,
+    notes: "Hold for customer color check",
+  });
+  ok("QC HOLD recorded (201)", qcHold.status === 201);
+  const lotAfterHold = await api("GET", `/api/lots/${lot5.id}`);
+  ok("lot transitioned to ON_HOLD", lotAfterHold.data.lot.status === "ON_HOLD");
+
+  // Release hold
+  const releaseHold = await api("PATCH", `/api/lots/${lot5.id}`, { status: "IN_PRODUCTION" });
+  ok("lot released back to IN_PRODUCTION", releaseHold.status === 200 && releaseHold.data.lot.status === "IN_PRODUCTION");
+
+  // 8. Progress lot through pipeline to terminal stage
+  let activeLot5 = (await api("GET", `/api/lots/${lot5.id}`)).data.lot;
+  let s = 0;
+  while (activeLot5.currentStageId && s < 30) {
+    const res = await api("POST", `/api/lots/${lot5.id}/events`, {
+      stageId: activeLot5.currentStageId,
+      eventType: "COMPLETED",
+      inputWeightG: activeLot5.currentWeightG,
+      outputWeightG: Math.max(1, Math.round(activeLot5.currentWeightG * 0.98)),
+      clientEventId: `e2e-qc-finish-${RUN}-${s}`,
+    });
+    if (res.status !== 200) break;
+    if (res.data?.nextStageName === null) break;
+    activeLot5 = (await api("GET", `/api/lots/${lot5.id}`)).data.lot;
+    s++;
+  }
+  const lotAtTerminal = (await api("GET", `/api/lots/${lot5.id}`)).data.lot;
+  ok(
+    "lot reached terminal stage but awaits QC (not prematurely completed)",
+    lotAtTerminal.status === "IN_PRODUCTION"
+  );
+
+  // Resolve any in-process auto-flags before final QC approval
+  for (const flag of (lotAtTerminal.qualityFlags || [])) {
+    if (flag.status === "OPEN") {
+      await api("PATCH", `/api/quality-flags/${flag.id}`, { status: "RESOLVED" });
+    }
+  }
+
+  // 9. Passing QC inspection triggers completion & weight reconciliation
+  const qcPass = await api("POST", `/api/lots/${lot5.id}/qc`, {
+    outcome: "PASS",
+    measuredWeightG: 1850,
+    skeinCount: 4,
+    totalYardageM: 480,
+    actualPly: 3,
+    actualTwist: "Z",
+    visualGrade: "PASS",
+    notes: "Excellent loft and consistent 3-ply twist.",
+  });
+  ok("QC PASS inspection recorded (201)", qcPass.status === 201);
+  ok("QC PASS reconciled current weight to 1850g", qcPass.data.currentWeightG === 1850);
+  ok("QC PASS transitioned lot to COMPLETED", qcPass.data.lotStatus === "COMPLETED");
+
+  // Order 5 auto-recalculates to READY_FOR_PICKUP
+  const ord5Final = await api("GET", `/api/orders/${order5.id}`);
+  ok("order 5 auto-flipped to READY_FOR_PICKUP", ord5Final.data.order.status === "READY_FOR_PICKUP");
+  ok(
+    "ORDER_READY notification emitted for order 5",
+    ord5Final.data.order.notifications.some((n) => n.event === "ORDER_READY")
+  );
+
+  // 10. Story label unlocked
+  const storyLabelUnlocked = await fetchPage(`${BASE}/label/${lot5.id}/story`, { Cookie: cookie });
+  const storyLabelUnlockedHtml = await storyLabelUnlocked.text();
+  ok(
+    "story label unlocked after passing QC",
+    storyLabelUnlocked.status === 200 &&
+      storyLabelUnlockedHtml.includes("SmartFleece Provenance") &&
+      storyLabelUnlockedHtml.includes("Print story tag")
+  );
+
+  // Extract public v2 token
+  const token5Match = storyLabelUnlockedHtml.match(/\/story\/(st_[a-f0-9_]+)/);
+  ok("v2 story token generated on label", Boolean(token5Match && token5Match[1]));
+  const token5 = token5Match ? token5Match[1] : "";
+
+  // 11. Public Fiber Story certifies quality seal
+  const story5Res = await fetch(`${BASE}/story/${token5}`);
+  const story5Html = await story5Res.text();
+  ok(
+    "public fiber story displays Mill Quality Approved seal",
+    story5Res.status === 200 && story5Html.includes("Mill Quality Approved")
+  );
+  ok("fiber story shows finished weight", story5Html.includes("Finished Weight"));
+
+  // Privacy verification: public page hides worker ID and inspector notes
+  ok(
+    "public story strictly conceals internal notes and inspector identity",
+    !story5Html.includes("Excellent loft and consistent") &&
+      !story5Html.includes("Asha Kapoor") &&
+      !story5Html.includes("Sam Carder")
+  );
+
+  // 12. History preservation: multiple inspections are preserved in GET /api/lots/[id]/qc
+  const qcHistoryRes = await api("GET", `/api/lots/${lot5.id}/qc`);
+  ok("GET /api/lots/[id]/qc returns 200", qcHistoryRes.status === 200);
+  ok(
+    "QC history preserves all inspection attempts (REWORK, HOLD, PASS)",
+    qcHistoryRes.data.history.length >= 3 &&
+      qcHistoryRes.data.history.some((h) => h.outcome === "REWORK") &&
+      qcHistoryRes.data.history.some((h) => h.outcome === "HOLD") &&
+      qcHistoryRes.data.history.some((h) => h.outcome === "PASS")
+  );
+  ok("latest QC is marked fresh", qcHistoryRes.data.isFresh === true);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

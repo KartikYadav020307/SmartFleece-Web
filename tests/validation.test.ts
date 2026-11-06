@@ -58,6 +58,16 @@ describe("stageEventSchema", () => {
   it("rejects unknown event types", () => {
     expect(stageEventSchema.safeParse({ stageId: "s1", eventType: "TELEPORTED" }).success).toBe(false);
   });
+
+  it("accepts optional machineId (registry) and machine (free text)", () => {
+    const reg = stageEventSchema.safeParse({ stageId: "s1", machineId: "mach-123" });
+    expect(reg.success).toBe(true);
+    if (reg.success) expect(reg.data.machineId).toBe("mach-123");
+
+    const free = stageEventSchema.safeParse({ stageId: "s1", machine: "Washer #2" });
+    expect(free.success).toBe(true);
+    if (free.success) expect(free.data.machine).toBe("Washer #2");
+  });
 });
 
 describe("splitSchema", () => {

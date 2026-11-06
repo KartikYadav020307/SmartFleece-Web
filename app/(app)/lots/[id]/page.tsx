@@ -11,6 +11,9 @@ import FlagList from "@/components/FlagList";
 import { LotStatusControls, UndoStageButton, SplitForm, BlendForm, LineageTreeView } from "@/components/LotActions";
 import { fmtDateTime, fmtSignedWeight, fmtWeight, timeAtStage } from "@/lib/format";
 import { cleanYieldPct } from "@/lib/calc";
+import { generateStoryToken } from "@/lib/story-token";
+import QCInspectionForm from "@/components/QCInspectionForm";
+import { isQCFresh } from "@/lib/qc";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +29,10 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
       currentStage: true,
       stageEvents: { orderBy: { createdAt: "asc" }, include: { stage: true, worker: true, machineRef: { select: { name: true } } } },
       qualityFlags: { orderBy: { createdAt: "desc" } },
+      qcInspections: {
+        orderBy: { createdAt: "desc" },
+        include: { inspector: { select: { id: true, name: true } } },
+      },
     },
   });
   if (!lot) notFound();
@@ -54,6 +61,9 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
   const yieldPct = cleanYieldPct(lot.greaseWeightG, lot.currentWeightG);
   const lastEventAt = activeEvents[activeEvents.length - 1]?.createdAt ?? lot.createdAt;
   const qrDataUrl = await QRCode.toDataURL(lot.lotCode, { margin: 1, width: 260 });
+  const storyToken = generateStoryToken(lot.id);
+  const latestQC = lot.qcInspections[0] ?? null;
+  const isFreshQC = Boolean(latestQC && latestQC.outcome === "PASS" && isQCFresh(lot, latestQC));
 
   const canTransform = lot.status === "PENDING" || lot.status === "IN_PRODUCTION" || lot.status === "ON_HOLD";
 
@@ -77,7 +87,10 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
         actions={
           <>
             <Link href={`/label/${lot.id}`} className="btn-secondary">
-              🏷️ Print label
+              🏷️ In-process label
+            </Link>
+            <Link href={`/label/${lot.id}/story`} className="btn-secondary">
+              🧶 Story tag
             </Link>
             <Link href={`/scan?code=${lot.lotCode}`} className="btn-primary">
               Open in scanner
@@ -151,6 +164,21 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
                 currentWeightG: lot.currentWeightG,
                 status: lot.status,
               }}
+            />
+          </Card>
+
+          <Card
+            title="Finished-Goods QC Checklist"
+            description="Structured final inspection for finished goods before completion & story tag printing"
+          >
+            <QCInspectionForm
+              lotId={lot.id}
+              currentWeightG={lot.currentWeightG}
+              status={lot.status}
+              targetProduct={lot.order.targetProduct}
+              yarnSpecs={lot.order.yarnSpecs}
+              history={lot.qcInspections}
+              isFresh={isFreshQC}
             />
           </Card>
 
@@ -266,6 +294,20 @@ export default async function LotDetailPage({ params }: { params: Promise<{ id: 
               <a href={qrDataUrl} download={`${lot.lotCode}.png`} className="btn-secondary btn-sm mt-3">
                 ⬇ Download PNG
               </a>
+            </div>
+          </Card>
+
+          <Card title="The Fiber Story (Module 6.3)" description="Finished-product secondary QR for consumers & makers">
+            <p className="text-xs text-muted mb-3">
+              Public provenance certificate showing farm origins, blend breakdown, clean yield and stage history.
+            </p>
+            <div className="space-y-2">
+              <Link href={`/story/${storyToken}`} target="_blank" className="btn-primary w-full text-center text-xs">
+                🌾 Preview Public Fiber Story
+              </Link>
+              <Link href={`/label/${lot.id}/story`} className="btn-secondary w-full text-center text-xs">
+                {isFreshQC ? "🏷️ Print Finished Product Label" : "🏷️ Print Label (Requires Passing QC)"}
+              </Link>
             </div>
           </Card>
 

@@ -9,11 +9,18 @@ export function weightLossPct(inputG: number, outputG: number): number {
 }
 
 /**
- * Spec 2.5: alert when actual loss is more than 15 percentage points above
- * the expected loss for the stage/fiber.
+ * Spec 2.5: alert when actual weight loss deviates from the stage's expected
+ * loss by more than 15 percentage points in EITHER direction — above expected
+ * (excessive shrinkage) or below expected (abnormally low loss: possible
+ * scale error or mis-scan). Weight gain registers as a negative loss and
+ * trips the low side wherever the stage expects meaningful loss (e.g. any
+ * gain during Washing). On stages with 0% expected loss, sub-threshold
+ * moisture-regain noise stays unflagged to avoid alarm fatigue. The 15-point
+ * unit is the tolerance the specification already establishes for the high
+ * side; no separate constant is introduced.
  */
 export function isAbnormalLoss(actualLossPct: number, expectedLossPct: number): boolean {
-  return actualLossPct > expectedLossPct + LOSS_DEVIATION_THRESHOLD;
+  return Math.abs(actualLossPct - expectedLossPct) > LOSS_DEVIATION_THRESHOLD;
 }
 
 /** Overall clean yield % of a completed lot (finished / grease × 100). */

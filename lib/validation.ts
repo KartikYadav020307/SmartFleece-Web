@@ -10,6 +10,9 @@ import {
   STAGE_EVENT_TYPES,
   FLAG_TYPES,
   SEVERITIES,
+  QC_OUTCOMES,
+  QC_VISUAL_GRADES,
+  QC_TWIST_TYPES,
 } from "./constants";
 
 const optionalString = z
@@ -184,6 +187,87 @@ export const delaySchema = z.object({
     .max(60, "Delay cannot exceed 60 days"),
   notes: optionalString,
 });
+
+export const qcInspectionSchema = z
+  .object({
+    outcome: z.enum(QC_OUTCOMES),
+    measuredWeightG: optionalInt,
+    skeinCount: optionalInt,
+    totalYardageM: optionalInt,
+    actualPly: optionalInt,
+    actualTwist: z
+      .enum(QC_TWIST_TYPES)
+      .optional()
+      .or(z.literal(""))
+      .transform((v) => (v === "" ? undefined : v)),
+    visualGrade: z
+      .enum(QC_VISUAL_GRADES)
+      .optional()
+      .or(z.literal(""))
+      .transform((v) => (v === "" ? undefined : v)),
+    notes: optionalString,
+  })
+  .superRefine((val, ctx) => {
+    // If PASS, measuredWeightG is required and must be positive
+    if (val.outcome === "PASS") {
+      if (!val.measuredWeightG || val.measuredWeightG <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["measuredWeightG"],
+          message: "Final verified measured weight (in grams) is required for PASS outcome",
+        });
+      }
+      // If visualGrade is REJECT, outcome cannot be PASS
+      if (val.visualGrade === "REJECT") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["outcome"],
+          message: "Cannot mark outcome as PASS when visual grade is REJECT",
+        });
+      }
+    }
+
+    // If REWORK, HOLD, or FAIL, notes explaining why is required
+    if (["REWORK", "HOLD", "FAIL"].includes(val.outcome) && (!val.notes || val.notes.trim().length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["notes"],
+        message: `Notes are required when outcome is ${val.outcome} to record the reason/disposition`,
+      });
+    }
+
+    // Measurements ranges check
+    if (val.measuredWeightG !== undefined && val.measuredWeightG <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["measuredWeightG"],
+        message: "Measured weight must be greater than 0 grams",
+      });
+    }
+    if (val.skeinCount !== undefined && val.skeinCount <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["skeinCount"],
+        message: "Skein count must be greater than 0",
+      });
+    }
+    if (val.totalYardageM !== undefined && val.totalYardageM <= 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["totalYardageM"],
+        message: "Total yardage must be greater than 0 meters",
+      });
+    }
+    if (val.actualPly !== undefined && (val.actualPly <= 0 || val.actualPly > 32)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["actualPly"],
+        message: "Actual ply must be a positive integer between 1 and 32",
+      });
+    }
+  });
+
+export type QCInspectionInput = z.infer<typeof qcInspectionSchema>;
 
 export function firstIssue(error: z.ZodError): string {
   const issue = error.issues[0];

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { FLAG_TYPES, SEVERITIES } from "@/lib/constants";
 import { Field } from "@/components/ui";
 import { fmtWeight } from "@/lib/format";
-import { enqueue, getQueue } from "@/lib/offline";
+import { enqueue, retireResolved, classifyResponse } from "@/lib/offline";
 
 export type StageEventTarget = {
   lotId: string;
@@ -24,10 +24,13 @@ export type MachineOption = { id: string; name: string };
 export default function StageEventForm({
   target,
   machines = [],
+  resolvesClientEventId,
   onDone,
 }: {
   target: StageEventTarget;
   machines?: MachineOption[];
+  /** When set, this submission is the linked replacement for a rejected offline event. */
+  resolvesClientEventId?: string;
   onDone?: (msg: string) => void;
 }) {
   const router = useRouter();
@@ -62,10 +65,12 @@ export default function StageEventForm({
     setBusy(true);
     setMessage(null);
     const clientEventId = crypto.randomUUID();
+    const isRegistry = machines.length > 0;
     const body = JSON.stringify({
       stageId: target.currentStage!.id,
       eventType,
-      machineId: machineId || undefined,
+      machineId: isRegistry && machineId ? machineId : undefined,
+      machine: !isRegistry && machineId ? machineId : undefined,
       inputWeightG: inputWeight || undefined,
       outputWeightG: outputWeight || undefined,
       notes: notes || undefined,
@@ -81,9 +86,17 @@ export default function StageEventForm({
         headers: { "Content-Type": "application/json" },
         body,
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setMessage({ kind: "err", text: data.error ?? "Could not record stage event" });
+      const data = await res.json().catch(() => ({}));
+      const cls = classifyResponse(res.status);
+      if (cls === "synced") {
+        if (resolvesClientEventId) {
+          retireResolved(resolvesClientEventId, "replacement_synced");
+        }
+      } else if (cls === "rejected") {
+        setMessage({ kind: "err", text: data.error ?? `Rejected by server (HTTP ${res.status})` });
+        return;
+      } else {
+        setMessage({ kind: "err", text: `Server error (HTTP ${res.status}) — the event was not recorded. Try again.` });
         return;
       }
       const delta =
@@ -111,10 +124,11 @@ export default function StageEventForm({
         lotCode: target.lotCode,
         stageName: target.currentStage!.name,
         savedAt: Date.now(),
+        resolvesClientEventId: resolvesClientEventId || undefined,
       });
       setMessage({
         kind: "ok",
-        text: `You appear to be offline — the scan was saved on this device (${getQueue().length} queued) and will sync automatically when the connection returns.`,
+        text: "You appear to be offline — the scan was saved on this device and will sync automatically when the connection returns.",
       });
       setOutputWeight("");
       setNotes("");

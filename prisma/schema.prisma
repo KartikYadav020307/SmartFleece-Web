@@ -22,6 +22,7 @@ model User {
   isSample     Boolean      @default(false)
   sessions     Session[]
   stageEvents  StageEvent[]
+  qcInspections QCInspection[]
   createdAt    DateTime     @default(now())
 }
 
@@ -108,6 +109,7 @@ model FiberLot {
   parents         LineageEdge[] @relation("child")
   children        LineageEdge[] @relation("parent")
   qualityFlags    QualityFlag[]
+  qcInspections   QCInspection[]
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
@@ -146,6 +148,7 @@ model StageEvent {
   notes         String?
   clientEventId String?   @unique // idempotency key for offline scan queue sync
   revertedAt    DateTime?
+  qcInspections QCInspection[]
   createdAt     DateTime  @default(now())
 
   @@index([lotId])
@@ -268,4 +271,30 @@ model Payment {
   createdAt   DateTime @default(now())
 
   @@index([invoiceId])
+}
+
+model QCInspection {
+  id              String      @id @default(cuid())
+  lotId           String
+  lot             FiberLot    @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  stageEventId    String?
+  stageEvent      StageEvent? @relation(fields: [stageEventId], references: [id], onDelete: SetNull)
+  inspectorId     String?
+  inspector       User?       @relation(fields: [inspectorId], references: [id], onDelete: SetNull)
+  inspectorName   String?     // Immutable snapshot of inspector name at time of inspection
+  outcome         String      // PASS | REWORK | HOLD | FAIL
+  measuredWeightG Int?        // Verified final net scale weight in grams
+  previousWeightG Int?        // Weight before inspection reconciliation
+  weightDeltaG    Int?        // measuredWeightG - previousWeightG
+  skeinCount      Int?        // Count of skeins or units
+  totalYardageM   Int?        // Total measured yardage in meters
+  actualPly       Int?        // 1, 2, 3, 4, etc.
+  actualTwist     String?     // S | Z | Balanced
+  visualGrade     String?     // PASS | MINOR_FLAW | REJECT
+  notes           String?     // Observations or reason for rework/hold/fail
+  createdAt       DateTime    @default(now())
+
+  @@index([lotId])
+  @@index([outcome])
+  @@index([stageEventId])
 }

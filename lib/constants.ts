@@ -41,6 +41,10 @@ export const STAGE_EVENT_TYPES = ["COMPLETED", "SKIPPED"] as const;
 export const LINEAGE_TYPES = ["BLEND", "SPLIT"] as const;
 export const ROLES = ["OWNER", "WORKER", "ACCOUNTANT"] as const;
 
+export const QC_OUTCOMES = ["PASS", "REWORK", "HOLD", "FAIL"] as const;
+export const QC_VISUAL_GRADES = ["PASS", "MINOR_FLAW", "REJECT"] as const;
+export const QC_TWIST_TYPES = ["S", "Z", "Balanced"] as const;
+
 // A lot with no stage event for this many days is flagged as stalled on the dashboard.
 export const STALL_DAYS = 3;
 

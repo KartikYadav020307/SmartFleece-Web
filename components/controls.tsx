@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { IconLogout } from "@/components/icons";
 
 /**
  * Two-step inline confirmation (no accidental destructive clicks, no modal
@@ -51,19 +52,37 @@ export function ConfirmButton({
   );
 }
 
-export function LogoutButton() {
+export function LogoutButton({
+  className = "btn-ghost btn-sm",
+  children,
+  iconOnly = false,
+  title = "Sign out",
+}: {
+  className?: string;
+  children?: React.ReactNode;
+  iconOnly?: boolean;
+  title?: string;
+} = {}) {
   const router = useRouter();
   return (
     <button
       type="button"
-      className="btn-ghost btn-sm"
+      className={className}
+      aria-label={title}
+      title={title}
       onClick={async () => {
         await fetch("/api/auth/logout", { method: "POST" });
         router.push("/login");
         router.refresh();
       }}
     >
-      Sign out
+      {children ? (
+        children
+      ) : iconOnly ? (
+        <IconLogout size={18} aria-hidden="true" />
+      ) : (
+        "Sign out"
+      )}
     </button>
   );
 }

@@ -245,4 +245,48 @@ Implements the structured finished-goods QC checklist for final physical inspect
 | `prisma/dev.db` SHA-256 after | **identical — hard gate passed** |
 | Audit server / port 3001 cleanup | Verified PID stopped, port 3001 closed, port 3000 untouched |
 
+---
+
+## Phase 1 — Design System, Shared Components & Responsive App Shell (2026-11-07)
+
+Establishes the foundational design tokens, shared UI primitives, and responsive navigation shell based on the target dashboard visual reference (`image(20261106-224542).png`), resolving mobile navigation friction and tablet layout overflow without touching page bodies or database queries.
+
+### 1. Warm-Stone Design Tokens (`app/globals.css`)
+- Defined Tailwind CSS v4 `@theme` tokens: Canvas (`#ECEBE6`), Surface (`#FFFFFF`), Pale Sage (`#E8EEE9`), Forest Green (`#426B57`), Deep Brand (`#315342`), and Dark Accent (`#1E2522`).
+- Recalibrated muted text to `#525A54`, providing verified WCAG AA contrast (5.97:1 on canvas, 7.12:1 on white).
+- Maintained 100% backwards-compatibility for existing semantic color aliases (`cream`, `forest`, `line`, `ink`, `muted`, `slate`, `amber`, `clay`, `terra`).
+- Enforced universal $\ge 44 \times 44\text{px}$ touch targets across `.btn`, `.btn-sm`, and `.input` controls.
+- Upgraded `.card` with `rounded-2xl` and `min-w-0` defensive flex sizing.
+
+### 2. Zero-Dependency Line Icons (`components/icons.tsx`)
+- Hand-crafted accessible SVG line icon set replacing emoji navigation (Dashboard, Production, Lots, Scan, Customers, Orders, Quality, Invoices, Reports, Settings, More, Close, Logout).
+- Implemented `SmartFleeceLogo` rosette mark matching the reference visual design.
+- Added 0 external packages; 0 kB added to shared First Load JS bundle.
+
+### 3. Dual Responsive App Shell (`components/Sidebar.tsx`, `app/(app)/layout.tsx`)
+- **Desktop/Tablet ($\ge 768\text{px}$):** Sleek 72px vertical icon rail (`w-18`) with dark circular active indicator, tooltips, accessible `aria-current="page"`, and bottom settings/logout controls.
+- **Mobile ($< 768\text{px}$):** Fixed bottom navigation bar with 5 primary touchpoints (Home, Production, elevated center Scan action, Lots, More) and safe-area inset protection (`env(safe-area-inset-bottom)`).
+- **Accessible More Menu Sheet:** Keyboard-accessible (`Escape` dismiss, focus restoration) slide-up dialog housing secondary destinations and mobile sign out.
+- **Header:** Clean solid white header with mill context, user profile, and role badge; removed duplicate header logout button.
+- **Layout Spacing:** Added `min-w-0` and `pb-24 md:pb-8` clearance on `<main>`, completely eliminating the 768px iPad portrait dashboard overflow (+249px previously) without hiding content.
+
+### 4. Shared UI Primitives (`components/ui.tsx`, `components/controls.tsx`)
+- Preserved all existing exports and prop APIs.
+- Upgraded `Card` and `StatCard` with modern typography and `min-w-0` constraints.
+- Added `IconButton` enforcing accessible labels and $\ge 44\text{px}$ touch targets.
+- Added lightweight `Skeleton` and `CardSkeleton` primitives for future streaming loading states.
+- Enhanced `LogoutButton` to support icon-only rendering and accessible titles.
+
+### Verification (isolated, per protocol)
+
+| Check | Result |
+|---|---|
+| `npm test` (`vitest run`) | **86/86 passed** (across 8 test files) |
+| `npm run typecheck` | Clean (`tsc --noEmit`) |
+| `npm run build` | **Clean in 6.7s**; 50 routes, 19 static pages; Shared JS = **103 kB** (identical to baseline) |
+| e2e vs production server on port 3002 | **133/133 passed, 0 failed** against `audit_phase0_e2e.db` |
+| Viewport audit (360, 390, 430, 768, 1024, 1280, 1440px) | **Zero overflow on all routes** (`/dashboard` at 768px: 753px $\le$ 768px window) |
+| Touch target audit | 100% of navigation and shell controls $\ge 44 \times 44\text{px}$ |
+| `prisma/dev.db` SHA-256 before & after | `E0AB34EC5A095293010B61B2CA81CF822171A2974D8A66DC2DD0DE98C3E55440` (byte-identical) |
+| Port 3000 & 3001 | Untouched and undisturbed |
 

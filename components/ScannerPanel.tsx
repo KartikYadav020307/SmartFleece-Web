@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import type { Html5Qrcode } from "html5-qrcode";
 import StageEventForm from "@/components/StageEventForm";
 import { Badge, Card } from "@/components/ui";
 import { ConfirmButton } from "@/components/controls";
@@ -57,13 +58,21 @@ export default function ScannerPanel() {
   const [error, setError] = useState<string | null>(null);
   const [lookingUp, setLookingUp] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
+  const [cameraStarting, setCameraStarting] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [queueItems, setQueueItems] = useState(getQueue());
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [statusChecks, setStatusChecks] = useState<Record<string, StatusCheck>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
   const [machines, setMachines] = useState<{ id: string; name: string }[]>([]);
-  const scannerRef = useRef<{ stop: () => Promise<void>; clear: () => void } | null>(null);
+
+  // Camera lifecycle & concurrency guards
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const isMountedRef = useRef(true);
+  const isStartingRef = useRef(false);
+  const isStoppingRef = useRef(false);
+  const stopPromiseRef = useRef<Promise<void> | null>(null);
+  const scanHandledRef = useRef(false);
 
   const refreshQueue = useCallback(() => setQueueItems(getQueue()), []);
 
@@ -126,56 +135,156 @@ export default function ScannerPanel() {
     };
   }, [refreshQueue]);
 
-  // Camera lifecycle.
-  useEffect(() => {
-    return () => {
-      const scanner = scannerRef.current;
-      if (scanner) {
-        scanner.stop().catch(() => undefined);
+  /**
+   * Centralized, idempotent scanner shutdown.
+   * Checks runtime state before calling stop(), catches synchronous library exceptions,
+   * awaits any in-flight stop operation, and releases media tracks cleanly.
+   */
+  const safeStopCamera = useCallback(async (): Promise<void> => {
+    if (stopPromiseRef.current) {
+      return stopPromiseRef.current;
+    }
+
+    const doStop = async () => {
+      isStoppingRef.current = true;
+      try {
+        const scanner = scannerRef.current;
+        if (!scanner) return;
+
+        // html5-qrcode stop() throws synchronously if state is NOT_STARTED (1).
+        // It is only safe to stop when SCANNING (2) or PAUSED (3).
+        let canStop = false;
+        try {
+          if (typeof scanner.getState === "function") {
+            const state = scanner.getState();
+            canStop = state === 2 || state === 3;
+          } else if (typeof scanner.isScanning === "boolean") {
+            canStop = scanner.isScanning;
+          }
+        } catch {
+          canStop = false;
+        }
+
+        if (canStop) {
+          try {
+            await scanner.stop();
+          } catch (stopErr: unknown) {
+            // Silently absorb already-stopped/state transitions
+            console.debug("Safe scanner stop handled:", stopErr);
+          }
+        }
+
+        try {
+          scanner.clear();
+        } catch (clearErr: unknown) {
+          console.debug("Safe scanner clear handled:", clearErr);
+        }
+      } finally {
+        scannerRef.current = null;
+        isStoppingRef.current = false;
+        stopPromiseRef.current = null;
+        if (isMountedRef.current) {
+          setCameraOn(false);
+          setCameraStarting(false);
+        }
       }
     };
+
+    const promise = doStop();
+    if (isStoppingRef.current) {
+      stopPromiseRef.current = promise;
+    }
+    return promise;
   }, []);
 
+  // Camera unmount & navigation lifecycle
+  useEffect(() => {
+    isMountedRef.current = true;
+    const handlePageHide = () => {
+      safeStopCamera().catch(() => undefined);
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      isMountedRef.current = false;
+      window.removeEventListener("pagehide", handlePageHide);
+      safeStopCamera().catch(() => undefined);
+    };
+  }, [safeStopCamera]);
+
   async function startCamera() {
+    if (isStartingRef.current || isStoppingRef.current || cameraOn || !isMountedRef.current) {
+      return;
+    }
+
+    isStartingRef.current = true;
+    scanHandledRef.current = false;
+    setCameraStarting(true);
     setCameraError(null);
+
     try {
       const { Html5Qrcode } = await import("html5-qrcode");
+
+      if (!isMountedRef.current || isStoppingRef.current) {
+        isStartingRef.current = false;
+        if (isMountedRef.current) setCameraStarting(false);
+        return;
+      }
+
+      if (scannerRef.current) {
+        await safeStopCamera();
+      }
+
       const scanner = new Html5Qrcode("sf-qr-reader");
       scannerRef.current = scanner;
+
       await scanner.start(
         { facingMode: "environment" },
         { fps: 10, qrbox: { width: 230, height: 230 } },
         (decodedText: string) => {
-          scanner.stop().then(() => {
-            setCameraOn(false);
+          if (scanHandledRef.current) return;
+          scanHandledRef.current = true;
+
+          safeStopCamera().then(() => {
             lookup(decodedText);
-          }).catch(() => setCameraOn(false));
+          });
         },
         () => undefined // per-frame decode misses — ignore
       );
-      setCameraOn(true);
+
+      // If unmounted or stop requested while start() was resolving, tear down immediately
+      if (!isMountedRef.current || isStoppingRef.current) {
+        await safeStopCamera();
+        return;
+      }
+
+      if (isMountedRef.current) {
+        setCameraOn(true);
+      }
     } catch (err: unknown) {
-      setCameraOn(false);
-      const message = err instanceof Error ? err.message : String(err);
-      setCameraError(
-        message.includes("Permission") || message.includes("NotAllowed")
-          ? "Camera permission denied — use manual lookup below instead."
-          : `Camera unavailable (${message}). Use manual lookup below.`
-      );
+      try {
+        scannerRef.current?.clear();
+      } catch {}
+      scannerRef.current = null;
+
+      if (isMountedRef.current) {
+        setCameraOn(false);
+        const message = err instanceof Error ? err.message : String(err);
+        setCameraError(
+          message.includes("Permission") || message.includes("NotAllowed")
+            ? "Camera permission denied — use manual lookup below instead."
+            : `Camera unavailable (${message}). Use manual lookup below.`
+        );
+      }
+    } finally {
+      isStartingRef.current = false;
+      if (isMountedRef.current) {
+        setCameraStarting(false);
+      }
     }
   }
 
   async function stopCamera() {
-    const scanner = scannerRef.current;
-    if (scanner) {
-      try {
-        await scanner.stop();
-        scanner.clear();
-      } catch {
-        // already stopped
-      }
-    }
-    setCameraOn(false);
+    await safeStopCamera();
   }
 
   async function checkStatus(clientEventId: string, lotCode: string) {
@@ -208,12 +317,22 @@ export default function ScannerPanel() {
       <Card title="Scan a lot QR code" description="Point the camera at a bag label, or type the lot code.">
         <div id="sf-qr-reader" className="mx-auto max-w-xs mb-3 rounded-xl overflow-hidden border border-line bg-black/[0.03]" />
         {cameraOn ? (
-          <button type="button" className="btn-secondary w-full" onClick={stopCamera}>
+          <button
+            type="button"
+            className="btn-secondary w-full"
+            onClick={stopCamera}
+            disabled={cameraStarting}
+          >
             Stop camera
           </button>
         ) : (
-          <button type="button" className="btn-primary w-full" onClick={startCamera}>
-            📷 Start camera
+          <button
+            type="button"
+            className="btn-primary w-full"
+            onClick={startCamera}
+            disabled={cameraStarting}
+          >
+            {cameraStarting ? "Starting camera…" : "📷 Start camera"}
           </button>
         )}
         {cameraError ? (

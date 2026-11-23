@@ -5,20 +5,32 @@
  * customers/orders/lots with realistic production history — including a
  * cross-order blend, a split, quality flags and notification records.
  *
- * DESTRUCTIVE: wipes existing rows first. Dev database only.
+ * DESTRUCTIVE: wipes existing rows first. Requires a separately confirmed
+ * local SQLite file; prisma/dev.db and all PostgreSQL targets are refused.
  *
- * Run: npm run db:seed  (or npm run db:reset to recreate the schema too)
+ * Run: npm run db:seed after explicitly configuring the safety variables.
  */
-import { PrismaClient, Stage } from "@prisma/client";
+import type { PrismaClient, Stage } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { DEFAULT_STAGES } from "../lib/constants";
+import { assertSafeSeedTarget } from "../lib/db-safety";
 import { newLotCode, newTrackingToken } from "../lib/ids";
 
-const prisma = new PrismaClient();
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
 async function main() {
+  const datasourceUrl = assertSafeSeedTarget();
+  const { PrismaClient } = await import("@prisma/client");
+  const prisma = new PrismaClient({ datasourceUrl });
+  try {
+    await seed(prisma);
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+async function seed(prisma: PrismaClient) {
   console.log("Seeding…");
 
   // Wipe in FK-safe order.
@@ -613,5 +625,4 @@ main()
   .catch((e) => {
     console.error(e);
     process.exit(1);
-  })
-  .finally(() => prisma.$disconnect());
+  });

@@ -1,0 +1,299 @@
+// Candidate PostgreSQL schema for the reviewed Supabase migration.
+// Keep prisma/schema.prisma on SQLite until an approved application cutover.
+// DateTime columns use timestamptz to preserve UTC instants.
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/smartfleece-postgresql"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  passwordHash  String
+  name          String
+  role          String         @default("WORKER") // OWNER | WORKER | ACCOUNTANT
+  isSample      Boolean        @default(false)
+  sessions      Session[]
+  stageEvents   StageEvent[]
+  qcInspections QCInspection[]
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+}
+
+model Session {
+  token     String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+}
+
+model Customer {
+  id          String     @id @default(cuid())
+  name        String
+  email       String?
+  phone       String?
+  farmName    String?
+  location    String?
+  preferences String? // saved processing preferences (free text)
+  notes       String? // internal mill notes
+  archived    Boolean    @default(false)
+  isSample    Boolean    @default(false)
+  orders      Order[]
+  lots        FiberLot[]
+  createdAt   DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime   @updatedAt @db.Timestamptz(3)
+
+  @@index([name])
+}
+
+model Order {
+  id                  String            @id @default(cuid())
+  orderNumber         String            @unique
+  customerId          String
+  customer            Customer          @relation(fields: [customerId], references: [id])
+  orderDate           DateTime          @default(now()) @db.Timestamptz(3)
+  shearingDate        DateTime?         @db.Timestamptz(3)
+  farmInfo            String? // farm / supplier context for this clip
+  targetProduct       String? // Yarn | Roving | Batts | Felt | Washed Fiber
+  yarnSpecs           String? // free text / JSON (weight, ply, twist)
+  dyeSpecs            String?
+  rush                Boolean           @default(false)
+  status              String            @default("RECEIVED") // see lib/constants.ts ORDER_STATUSES
+  estimatedCompletion DateTime?         @db.Timestamptz(3)
+  etaConfidenceDays   Int? // ± days from historical spread (rule-based ETA)
+  etaBasedOnSamples   Int? // how many historical stage events back the estimate
+  notes               String?
+  trackingToken       String            @unique @default(cuid()) // unguessable public tracking URL token
+  isSample            Boolean           @default(false)
+  lots                FiberLot[]
+  notifications       NotificationLog[]
+  invoice             Invoice?
+  createdAt           DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
+
+  @@index([customerId])
+  @@index([status])
+}
+
+model FiberLot {
+  id             String         @id @default(cuid())
+  lotCode        String         @unique // human-readable + QR payload (opaque, no customer data)
+  orderId        String
+  order          Order          @relation(fields: [orderId], references: [id])
+  customerId     String
+  customer       Customer       @relation(fields: [customerId], references: [id])
+  fiberType      String
+  breed          String?
+  greaseWeightG  Int // intake weight, grams
+  currentWeightG Int
+  currentStageId String?
+  currentStage   Stage?         @relation(fields: [currentStageId], references: [id])
+  status         String         @default("PENDING") // see lib/constants.ts LOT_STATUSES
+  conditionGrade String? // A | B | C | D
+  vmRating       String? // None | Low | Medium | Heavy
+  stapleLengthMm Int?
+  microns        Int?
+  color          String?
+  photos         String? // JSON array of storage URLs (storage integration pending)
+  isBatch        Boolean        @default(false) // created by blending lots
+  notes          String?
+  isSample       Boolean        @default(false)
+  stageEvents    StageEvent[]
+  parents        LineageEdge[]  @relation("child")
+  children       LineageEdge[]  @relation("parent")
+  qualityFlags   QualityFlag[]
+  qcInspections  QCInspection[]
+  createdAt      DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime       @updatedAt @db.Timestamptz(3)
+
+  @@index([orderId])
+  @@index([customerId])
+  @@index([status])
+  @@index([currentStageId])
+}
+
+model Stage {
+  id              String       @id @default(cuid())
+  name            String
+  sequence        Int
+  optional        Boolean      @default(false)
+  expectedLossPct Float        @default(0)
+  isActive        Boolean      @default(true)
+  stageEvents     StageEvent[]
+  lots            FiberLot[]
+}
+
+model StageEvent {
+  id            String         @id @default(cuid())
+  lotId         String
+  lot           FiberLot       @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  stageId       String
+  stage         Stage          @relation(fields: [stageId], references: [id])
+  workerId      String?
+  worker        User?          @relation(fields: [workerId], references: [id])
+  eventType     String         @default("COMPLETED") // COMPLETED | SKIPPED
+  // Registry machine for new events; legacy free-text kept for old records.
+  machineId     String?
+  machineRef    Machine?       @relation(fields: [machineId], references: [id])
+  machine       String?
+  inputWeightG  Int?
+  outputWeightG Int?
+  notes         String?
+  clientEventId String?        @unique // idempotency key for offline scan queue sync
+  revertedAt    DateTime?      @db.Timestamptz(3)
+  qcInspections QCInspection[]
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+
+  @@index([lotId])
+  @@index([stageId])
+}
+
+model LineageEdge {
+  id              String   @id @default(cuid())
+  parentLotId     String
+  parentLot       FiberLot @relation("parent", fields: [parentLotId], references: [id], onDelete: Cascade)
+  childLotId      String
+  childLot        FiberLot @relation("child", fields: [childLotId], references: [id], onDelete: Cascade)
+  contributionG   Int?
+  contributionPct Float?
+  lineageType     String // BLEND | SPLIT
+  notes           String?
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([parentLotId])
+  @@index([childLotId])
+}
+
+model QualityFlag {
+  id           String    @id @default(cuid())
+  lotId        String
+  lot          FiberLot  @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  stageEventId String?
+  flagType     String // VM | FELTING | COLOR | ODOR | MOLD | PEST | WEIGHT | OTHER
+  severity     String    @default("MEDIUM") // LOW | MEDIUM | HIGH
+  notes        String?
+  status       String    @default("OPEN") // OPEN | RESOLVED
+  resolvedBy   String?
+  resolvedAt   DateTime? @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([lotId])
+  @@index([status])
+}
+
+model NotificationLog {
+  id        String   @id @default(cuid())
+  orderId   String?
+  order     Order?   @relation(fields: [orderId], references: [id])
+  lotId     String?
+  channel   String   @default("EMAIL") // EMAIL | SMS | SYSTEM
+  event     String // ORDER_RECEIVED | STAGE_COMPLETE | ORDER_READY | DELAY | INVOICE_READY
+  recipient String?
+  subject   String
+  body      String
+  status    String   @default("LOGGED") // LOGGED (dev mode) | SENT | FAILED
+  error     String?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([orderId])
+}
+
+// Singleton pricing configuration (one row). Money is stored in minor units
+// (paise/cents) as integers throughout, mirroring the grams-for-weights rule.
+model PricingConfig {
+  id                   String   @id @default(cuid())
+  currencyCode         String   @default("INR")
+  currencySymbol       String   @default("₹")
+  taxLabel             String   @default("GST")
+  taxRatePct           Float    @default(5)
+  rushMultiplier       Float    @default(1.25)
+  minimumOrderFeeMinor Int      @default(0)
+  // { "default": 25000, "Merino Wool": 30000, ... } — minor units per kg
+  baseRatesJson        String   @default("{\"default\":25000}")
+  isSample             Boolean  @default(false)
+  updatedAt            DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model Invoice {
+  id              String    @id @default(cuid())
+  invoiceNumber   String    @unique
+  orderId         String    @unique
+  order           Order     @relation(fields: [orderId], references: [id])
+  billableWeightG Int // snapshot of non-consumed lot weights at generation
+  lineItemsJson   String // [{ description, kind, fiberType?, weightG?, rateMinorPerKg?, amountMinor, manual? }]
+  subtotalMinor   Int
+  taxLabel        String    @default("GST")
+  taxRatePct      Float     @default(0)
+  taxMinor        Int
+  totalMinor      Int
+  paidMinor       Int       @default(0)
+  status          String    @default("UNPAID") // UNPAID | PARTIAL | PAID
+  dueDate         DateTime? @db.Timestamptz(3)
+  notes           String?
+  isSample        Boolean   @default(false)
+  payments        Payment[]
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+
+  @@index([status])
+}
+
+model Machine {
+  id          String       @id @default(cuid())
+  name        String
+  type        String // Washer | Carder | Spinning Frame | Drum Carder | Dye Bath | Other (free text)
+  capacityKg  Float        @default(0)
+  status      String       @default("AVAILABLE") // AVAILABLE | IN_USE | MAINTENANCE
+  notes       String?
+  isActive    Boolean      @default(true)
+  isSample    Boolean      @default(false)
+  stageEvents StageEvent[]
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime     @updatedAt @db.Timestamptz(3)
+}
+
+model Payment {
+  id          String   @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amountMinor Int
+  method      String   @default("Cash") // Cash | Bank | UPI | Other
+  reference   String?
+  recordedBy  String?
+  paidAt      DateTime @default(now()) @db.Timestamptz(3)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([invoiceId])
+}
+
+model QCInspection {
+  id              String      @id @default(cuid())
+  lotId           String
+  lot             FiberLot    @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  stageEventId    String?
+  stageEvent      StageEvent? @relation(fields: [stageEventId], references: [id], onDelete: SetNull)
+  inspectorId     String?
+  inspector       User?       @relation(fields: [inspectorId], references: [id], onDelete: SetNull)
+  inspectorName   String? // Immutable snapshot of inspector name at time of inspection
+  outcome         String // PASS | REWORK | HOLD | FAIL
+  measuredWeightG Int? // Verified final net scale weight in grams
+  previousWeightG Int? // Weight before inspection reconciliation
+  weightDeltaG    Int? // measuredWeightG - previousWeightG
+  skeinCount      Int? // Count of skeins or units
+  totalYardageM   Int? // Total measured yardage in meters
+  actualPly       Int? // 1, 2, 3, 4, etc.
+  actualTwist     String? // S | Z | Balanced
+  visualGrade     String? // PASS | MINOR_FLAW | REJECT
+  notes           String? // Observations or reason for rework/hold/fail
+  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
+
+  @@index([lotId])
+  @@index([outcome])
+  @@index([stageEventId])
+}

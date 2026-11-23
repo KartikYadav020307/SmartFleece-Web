@@ -9,8 +9,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:push": "prisma db push",
-    "db:seed": "tsx prisma/seed.ts",
-    "db:reset": "prisma db push --force-reset && tsx prisma/seed.ts"
+    "db:seed": "prisma db seed",
+    "db:generate:postgres": "prisma generate --schema prisma/schema.postgresql.prisma",
+    "db:import:postgres": "tsx scripts/migrate-sqlite-to-postgres.ts",
+    "db:verify:postgres": "tsx scripts/verify-postgres-migration.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

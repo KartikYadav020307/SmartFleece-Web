@@ -290,3 +290,42 @@ Establishes the foundational design tokens, shared UI primitives, and responsive
 | `prisma/dev.db` SHA-256 before & after | `E0AB34EC5A095293010B61B2CA81CF822171A2974D8A66DC2DD0DE98C3E55440` (byte-identical) |
 | Port 3000 & 3001 | Untouched and undisturbed |
 
+## Supabase PostgreSQL migration preparation (2026-11-23)
+
+Prepared the local-only SQLite-to-PostgreSQL migration package. This work does
+not apply schema or data to the hosted project and does not switch the active
+SQLite runtime.
+
+- Added a PostgreSQL candidate Prisma schema with the existing 15 models,
+  relationships and indexes. All 27 `DateTime` fields use `TIMESTAMPTZ(3)`.
+- Added the initial Prisma migration SQL and PostgreSQL migration lock. The
+  reviewed SQL creates 15 tables, 26 indexes and 18 foreign keys, with no
+  `DROP`, `TRUNCATE` or standalone `DELETE` statements. Prisma Migrate remains
+  the only migration source of truth.
+- Added a hash-confirmed SQLite source guard, project/connection guards,
+  target-empty checks, transactional batched import tooling, read-only
+  preflight and migration verification. Existing sessions are deliberately
+  omitted so users sign in again after cutover.
+- The sample seed guard resolves filesystem aliases and refuses active SQLite
+  sidecars as well as the protected database file.
+- Hardened the destructive sample seed to require explicit local SQLite
+  confirmation and to reject `prisma/dev.db` and all PostgreSQL targets.
+- Added a sanitized `.env.example`, migration plan, compatibility note for
+  search casing, and README guidance. No credentials or new dependencies.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `npm test` | **112/112 passed** across 12 files |
+| `npm run typecheck` | Clean |
+| PostgreSQL Prisma schema validation | Passed with local placeholder URLs |
+| PostgreSQL Prisma Client generation | Passed; separate output directory |
+| Candidate migration diff | Recreated with Prisma 6.19.3 and matched after line-ending normalization |
+| Isolated production build | Passed with a separate build output directory |
+| E2E suite | **133/133 passed** against a second isolated SQLite copy |
+| Destructive seed | Passed against an isolated SQLite copy; source database remained untouched |
+| SQLite source SHA-256 | `FB8ECBF79DDB3185F8B05A97E68BCB5232271198AA4829C288C387AE634BFF89` before and after preparation |
+| Hosted schema/data operations | **None performed** |
+| Isolated PostgreSQL and PostgreSQL E2E | Not run; local PostgreSQL tooling was unavailable |
+
